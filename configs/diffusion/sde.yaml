@@ -1,0 +1,13 @@
+# SDE schedule configuration
+schedule:
+  type: "sde"
+  num_timesteps: 1000
+  sigma_min: 0.01
+  sigma_max: 50.0
+  sde_type: "vpsde"  # vpsde, vpsde_linear
+
+sampling:
+  num_inference_steps: 1000
+  predictor: "euler"  # euler, rk4
+  corrector: "langevin"  # langevin, none
+

@@ -1,0 +1,35 @@
+# Diffusion-MCTS Placer Configuration
+
+# Diffusion model
+diffusion:
+  num_timesteps: 1000
+  hidden_dim: 256
+  num_heads: 8
+  num_layers: 6
+  dropout: 0.1
+  num_cell_types: 16
+
+# MCTS search
+mcts:
+  ucb_c: 1.41  # Exploration constant
+  max_simulations: 1000
+
+# Critic (GNN routability predictor)
+critic:
+  threshold: 0.3  # Prune if P(routable) < threshold
+  node_dim: 64
+  edge_dim: 32
+  hidden_dim: 128
+  num_layers: 4
+  dropout: 0.1
+  timestep_aware: true
+
+# Router (nextpnr)
+router:
+  nextpnr_path: "nextpnr-xilinx"
+  chipdb_path: null  # Set to path for Xilinx
+  use_bindings: false  # Use C++ bindings if available
+  timeout: 60.0  # seconds
+
+# Device
+device: "cuda"

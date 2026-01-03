@@ -1,0 +1,17 @@
+# FPGA routing base configuration
+routing:
+  grid_type: "fpga"
+  num_layers: 1  # 2D routing, single layer
+  routing_resources:
+    - type: "wire"
+      capacity: 1
+    - type: "switch"
+      capacity: 1
+
+constraints:
+  drc:
+    min_spacing: 1
+    min_width: 1
+  timing:
+    max_delay: null  # No timing constraints initially
+

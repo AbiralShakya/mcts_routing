@@ -1,0 +1,38 @@
+# Ablation study configuration
+experiment:
+  name: "ablation_study"
+  
+ablation:
+  variants:
+    - name: "ddpm"
+      diffusion_schedule: "ddpm"
+      use_mcts: false
+    - name: "ddim"
+      diffusion_schedule: "ddim"
+      use_mcts: false
+    - name: "ddim_guided"
+      diffusion_schedule: "ddim"
+      use_guidance: true
+      use_mcts: false
+    - name: "mcts"
+      use_mcts: true
+      semantic_branching: true
+      value_normalization: true
+    - name: "mcts_no_semantic"
+      use_mcts: true
+      semantic_branching: false
+      value_normalization: true
+    - name: "mcts_no_normalization"
+      use_mcts: true
+      semantic_branching: true
+      value_normalization: false
+    - name: "mcts_random"
+      use_mcts: true
+      use_random_proposal: true
+    - name: "hybrid_ddim_mcts"
+      use_hybrid: true
+
+statistical_tests:
+  num_runs: 30
+  significance_level: 0.05
+

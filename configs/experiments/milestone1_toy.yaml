@@ -1,0 +1,18 @@
+# Milestone 1: Toy routing world
+experiment:
+  name: "milestone1_toy"
+  grid_size: [10, 10]
+  num_nets: 2
+  num_vias: 0
+  
+diffusion:
+  num_timesteps: 100
+  
+mcts:
+  num_simulations: 100
+  
+solver:
+  type: "shortest_path"
+  stability_mode: "randomized_tiebreak"
+  k_runs: 5
+

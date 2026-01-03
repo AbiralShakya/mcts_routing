@@ -1,0 +1,21 @@
+# H100 cluster specific configuration
+cluster:
+  name: "princeton"
+  partition: "gpu"
+  num_gpus: 8
+  nodes: 1
+  
+training:
+  batch_size: 256  # Larger batch for multi-GPU
+  num_epochs: 100
+  learning_rate: 1e-4
+  gradient_accumulation_steps: 1
+  
+distributed:
+  backend: "nccl"
+  init_method: "env://"
+  
+checkpointing:
+  checkpoint_dir: "/scratch/checkpoints"
+  shared_filesystem: true
+

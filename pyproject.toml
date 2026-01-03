@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mcts-routing"
+version = "0.1.0"
+description = "Diffusion-guided MCTS routing system for FPGA"
+requires-python = ">=3.9"
+dependencies = [
+    "torch>=2.0.0",
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "networkx>=3.0",
+    "pyyaml>=6.0",
+    "pytest>=7.4.0",
+]
+
+[tool.black]
+line-length = 100
+target-version = ['py39']
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+

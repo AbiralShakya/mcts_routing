@@ -1,0 +1,7 @@
+# Progressive widening parameters
+progressive_widening:
+  k: 2.0  # Base constant for child count
+  alpha: 0.5  # Exponent: max_children = k * N^alpha
+  min_children: 1
+  max_children: 10
+

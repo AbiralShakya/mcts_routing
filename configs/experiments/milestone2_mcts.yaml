@@ -1,0 +1,14 @@
+# Milestone 2: MCTS sanity check
+experiment:
+  name: "milestone2_mcts"
+  grid_size: [10, 10]
+  num_nets: 2
+  
+mcts:
+  num_simulations: 500
+  ucb_c: 1.41
+  
+comparison:
+  baselines: ["ddpm", "ddim", "ddim_guided"]
+  compute_parity: "unet_calls"  # unet_calls, wall_clock_time
+

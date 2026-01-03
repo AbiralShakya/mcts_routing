@@ -1,0 +1,28 @@
+# Base MCTS configuration
+mcts:
+  ucb_c: 1.41  # UCB exploration constant
+  max_depth: 50
+  num_simulations: 1000
+  temperature: 1.0
+  
+progressive_widening:
+  k: 2.0  # Base constant
+  alpha: 0.5  # Exponent
+  
+semantic_branching:
+  enabled: true
+  branch_on_unresolved_nets: true
+  branch_on_congestion: true
+  branch_on_entropy: true
+  congestion_threshold: 0.7
+  entropy_threshold: 0.5
+  
+value_normalization:
+  enabled: true
+  normalization_type: "variance_scale"  # variance_scale, discount
+  
+value_bootstrapping:
+  enabled: true
+  use_proxy_rewards: true
+  proxy_weight: 0.3
+

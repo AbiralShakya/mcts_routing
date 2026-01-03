@@ -1,0 +1,10 @@
+# Grid specifications for 100x100
+grid:
+  width: 100
+  height: 100
+  num_layers: 1  # 2D only
+  
+routing:
+  max_nets: 100
+  max_pins_per_net: 10
+

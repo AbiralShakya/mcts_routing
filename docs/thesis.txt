@@ -1,0 +1,61 @@
+# Diffusion-MCTS Placement for nextpnr-xilinx
+
+## Core Thesis
+
+```
+1. ROLLOUT:    Denoise from noise → placement candidate
+2. PRUNE:      Critic predicts "this path is fruitless" → kill early
+3. EVALUATE:   Survivors get real routing score at terminal state
+4. BACKPROP:   Propagate reward to root → informs next rollouts
+
+```
+
+That's it. Diffusion generates candidates. Critic kills bad ones early. Router scores survivors. Tree remembers what worked.
+
+## The Loop
+
+```python
+def run(n_iterations):
+    root = Node(x=noise)
+
+    for _ in range(n_iterations):
+        # Start from root (or promising node via UCB)
+        node = select_node(root)
+
+        # Rollout: denoise step by step
+        while not terminal(node):
+            node = denoise_step(node)
+
+            # CRITIC PRUNING: bail early if hopeless
+            if critic(node) < threshold:
+                backprop(node, reward=0)
+                break
+
+        # If we reached terminal: get real reward
+        if terminal(node):
+            placement = node.state
+            reward = route_and_score(placement)  # actual nextpnr routing
+            backprop(node, reward) # backprop successful place and orute
+
+    return best_path(root)
+
+```
+
+## Why This Works
+
+- **Critic saves compute**: Most rollouts are bad. Detect early, don't waste routing time.
+- **Real routing reward**: No proxy metrics. If it routes clean, it's good.
+- **Backprop to root**: Good terminal rewards strengthen the early decisions that led there.
+
+## Implementation
+
+```
+Phase 1: Get rollouts working (diffusion model + nextpnr router)
+Phase 2: Train critic on (partial_state → final_score) pairs
+Phase 3: Plug critic into loop for early pruning
+
+```
+
+## Success
+
+Fewer failed nets than SA baseline, without 100x the runtime.
