@@ -15,9 +15,9 @@ from dataclasses import dataclass
 
 from .gnn import RoutingCritic, RoutingGraph
 from .features import RoutingGraphBuilder
-from ..diffusion.model import RoutingState
+from ..diffusion.model import RoutingState, compute_congestion_from_latents
 from ..core.routing.grid import Grid
-from ..core.routing.netlist import Netlist
+from ..core.routing.netlist import Netlist, Net, Pin
 
 
 @dataclass
@@ -267,9 +267,10 @@ class CriticTrainer:
 def generate_training_data(
     netlists: List[Netlist],
     grids: List[Grid],
-    router_fn,  # Function: (state, netlist, grid) -> score
+    router_fn,  # Function: (routing_assignment, netlist, grid) -> RoutingResult
     diffusion_model,  # For generating partial states
-    samples_per_netlist: int = 100
+    samples_per_netlist: int = 100,
+    device: str = "cpu"
 ) -> List[RoutingExample]:
     """Generate training data by sampling partial routings.
 
@@ -277,13 +278,211 @@ def generate_training_data(
     2. Denoise to various timesteps (partial routings)
     3. Complete with real router
     4. Record (partial, final_score) pairs
+
+    Args:
+        netlists: List of netlists to sample from
+        grids: Corresponding grids for each netlist
+        router_fn: Function that takes (routing_assignment, netlist, grid) -> RoutingResult
+        diffusion_model: Trained diffusion model for generating partial states
+        samples_per_netlist: Number of samples per netlist
+        device: Device to run on
+
+    Returns:
+        List of RoutingExample for training
     """
+    import torch
+    from ..diffusion.sampler import initialize_routing_state
+
     examples = []
 
     for netlist, grid in zip(netlists, grids):
-        for _ in range(samples_per_netlist):
-            # Sample random partial routing via diffusion
-            # ... (implementation depends on diffusion model interface)
-            pass
+        num_nets = len(netlist.nets)
+        if num_nets == 0:
+            continue
+
+        # Compute net features and positions for this netlist
+        net_features = torch.zeros(num_nets, 8, device=device)
+        net_positions = torch.zeros(num_nets, 4, device=device)
+        width, height = grid.get_size()
+
+        for i, net in enumerate(netlist.nets):
+            if net.pins:
+                xs = [p.x for p in net.pins]
+                ys = [p.y for p in net.pins]
+                min_x, max_x = min(xs), max(xs)
+                min_y, max_y = min(ys), max(ys)
+
+                net_features[i, 0] = len(net.pins) / 100.0  # fanout
+                net_features[i, 1] = ((max_x - min_x) + (max_y - min_y)) / (width + height)  # HPWL
+
+                net_positions[i, 0] = min_x / max(width, 1)
+                net_positions[i, 1] = min_y / max(height, 1)
+                net_positions[i, 2] = max_x / max(width, 1)
+                net_positions[i, 3] = max_y / max(height, 1)
+
+        # Estimate PIPs per net (simplified)
+        pips_per_net = [max(10, len(net.pins) * 5) for net in netlist.nets]
+
+        for sample_idx in range(samples_per_netlist):
+            # Sample a random stopping timestep (partial routing depth)
+            num_timesteps = getattr(diffusion_model, 'num_timesteps', 1000)
+            # Sample from different stages: early (high t), middle, late (low t)
+            stop_timestep = torch.randint(1, num_timesteps, (1,)).item()
+
+            # Initialize with noise
+            state = initialize_routing_state(
+                num_nets=num_nets,
+                pips_per_net=pips_per_net,
+                num_timesteps=num_timesteps,
+                device=device
+            )
+
+            # Denoise to the stopping point
+            with torch.no_grad():
+                while state.timestep > stop_timestep:
+                    state = diffusion_model.denoise_step(
+                        state, net_features, net_positions
+                    )
+
+            # Decode to routing assignment
+            routing_assignment = diffusion_model.decode_routing(state, {})
+
+            # Get ground truth score from real router
+            try:
+                result = router_fn(routing_assignment, netlist, grid)
+                final_score = result.as_reward() if hasattr(result, 'as_reward') else float(result)
+                failed_nets = 0 if result.success else num_nets
+                congestion_max = getattr(result, 'congestion', 0.5)
+                timing_slack = getattr(result, 'slack', 0.0)
+            except Exception as e:
+                # Router failed - this is a hard negative example
+                final_score = 0.0
+                failed_nets = num_nets
+                congestion_max = 1.0
+                timing_slack = -999.0
+
+            # Create training example
+            example = RoutingExample(
+                state=state,
+                netlist=netlist,
+                grid=grid,
+                final_score=final_score,
+                failed_nets=failed_nets,
+                congestion_max=congestion_max,
+                timing_slack=timing_slack
+            )
+            examples.append(example)
+
+    return examples
+
+
+def generate_synthetic_training_data(
+    num_examples: int = 1000,
+    grid_sizes: List[Tuple[int, int]] = None,
+    nets_range: Tuple[int, int] = (5, 50),
+    device: str = "cpu"
+) -> List[RoutingExample]:
+    """Generate synthetic training data without real router.
+
+    Creates random partial routing states with estimated scores based on
+    congestion heuristics. Useful for bootstrapping critic training.
+
+    Args:
+        num_examples: Number of examples to generate
+        grid_sizes: List of (width, height) tuples to sample from
+        nets_range: Range of number of nets (min, max)
+        device: Device to use
+
+    Returns:
+        List of synthetic RoutingExample
+    """
+    import random
+
+    if grid_sizes is None:
+        grid_sizes = [(10, 10), (20, 20), (50, 50)]
+
+    examples = []
+
+    for _ in range(num_examples):
+        # Random grid size
+        width, height = random.choice(grid_sizes)
+        grid = Grid(width=width, height=height)
+
+        # Random number of nets
+        num_nets = random.randint(nets_range[0], nets_range[1])
+
+        # Generate random nets
+        nets = []
+        for net_id in range(num_nets):
+            num_pins = random.randint(2, 5)
+            pins = []
+            for pin_idx in range(num_pins):
+                x = random.randint(0, width - 1)
+                y = random.randint(0, height - 1)
+                pins.append(Pin(x=x, y=y, pin_id=pin_idx))
+            nets.append(Net(net_id=net_id, pins=pins, name=f"net_{net_id}"))
+
+        netlist = Netlist(nets=nets)
+
+        # Random partial routing state
+        pips_per_net = [random.randint(10, 50) for _ in range(num_nets)]
+
+        # Random timestep (representing routing progress)
+        timestep = random.randint(0, 1000)
+
+        # Generate random latents
+        net_latents = {}
+        routed_nets = set()
+        for i in range(num_nets):
+            latent = torch.randn(pips_per_net[i], device=device)
+            # Later timesteps have more concentrated distributions
+            concentration = 1.0 - (timestep / 1000.0)
+            latent = latent * (1 + concentration * 5)  # More peaked for lower t
+            net_latents[i] = latent
+
+            # Mark as routed with some probability (based on timestep)
+            if random.random() < (1.0 - timestep / 1000.0):
+                routed_nets.add(i)
+
+        # Compute congestion map from latents (not random!)
+        congestion_map = compute_congestion_from_latents(
+            net_latents=net_latents,
+            netlist=netlist,
+            grid_size=(width, height),
+            device=device
+        )
+
+        state = RoutingState(
+            net_latents=net_latents,
+            timestep=timestep,
+            routed_nets=routed_nets,
+            congestion_map=congestion_map
+        )
+
+        # Estimate score based on heuristics
+        # - More routed nets = better
+        # - Lower congestion = better
+        # - Later timestep (more progress) = better
+        routed_fraction = len(routed_nets) / max(num_nets, 1)
+        avg_congestion = congestion_map.mean().item()
+        max_congestion = congestion_map.max().item()
+        progress = 1.0 - (timestep / 1000.0)
+
+        # Combine into score (0-1)
+        base_score = 0.3 * routed_fraction + 0.3 * (1 - avg_congestion) + 0.4 * progress
+        # Add noise
+        noise = random.uniform(-0.1, 0.1)
+        final_score = max(0.0, min(1.0, base_score + noise))
+
+        example = RoutingExample(
+            state=state,
+            netlist=netlist,
+            grid=grid,
+            final_score=final_score,
+            failed_nets=num_nets - len(routed_nets),
+            congestion_max=congestion_map.max().item(),
+            timing_slack=0.0
+        )
+        examples.append(example)
 
     return examples

@@ -5,7 +5,7 @@ from typing import Dict, List, Tuple, Optional
 from ...core.routing.grid import Grid
 from ...core.routing.netlist import Netlist, Net, Pin
 from ...core.routing.placement import Placement
-from ...core.routing.state import RoutingState, WireSegment
+from ...core.routing.state import PhysicalRoutingState, WireSegment
 
 
 class NextPNRReader:
@@ -96,7 +96,7 @@ class NextPNRReader:
             cell_placements=cell_placements if cell_placements else None
         )
     
-    def read_routing(self, file_path: str, grid: Grid, netlist: Netlist) -> RoutingState:
+    def read_routing(self, file_path: str, grid: Grid, netlist: Netlist) -> PhysicalRoutingState:
         """Read routing from nextpnr JSON.
         
         Args:
@@ -110,7 +110,7 @@ class NextPNRReader:
         with open(file_path, 'r') as f:
             data = json.load(f)
         
-        routing_state = RoutingState(grid=grid, netlist=netlist)
+        routing_state = PhysicalRoutingState(grid=grid, netlist=netlist)
         routes_data = data.get('routes', [])
         
         for route_data in routes_data:
@@ -132,7 +132,7 @@ class NextPNRReader:
         
         return routing_state
     
-    def read_all(self, file_path: str) -> Tuple[Grid, Netlist, Placement, Optional[RoutingState]]:
+    def read_all(self, file_path: str) -> Tuple[Grid, Netlist, Placement, Optional[PhysicalRoutingState]]:
         """Read all data from nextpnr JSON file.
         
         Args:

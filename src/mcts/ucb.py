@@ -8,16 +8,21 @@ from .node import RoutingNode
 def ucb_score(
     child: RoutingNode,
     parent: RoutingNode,
-    c: float = 1.41
+    c: float = 1.41,
+    use_time_normalization: bool = True
 ) -> float:
-    """Compute UCB score.
+    """Compute UCB score with optional time-aware normalization.
 
-    UCB = Q + c * sqrt(ln(N_parent) / N_child)
+    UCB = Q_norm + c * sqrt(ln(N_parent) / N_child)
+
+    Where Q_norm is time-normalized Q-value that accounts for
+    uncertainty at different timesteps in the diffusion process.
 
     Args:
         child: Child node
         parent: Parent node
         c: Exploration constant
+        use_time_normalization: Whether to use time-aware Q normalization
 
     Returns:
         UCB score
@@ -25,7 +30,12 @@ def ucb_score(
     if child.visit_count == 0:
         return float('inf')
 
-    exploitation = child.Q
+    # Use time-normalized Q for better exploration balance
+    if use_time_normalization:
+        exploitation = child.Q_normalized
+    else:
+        exploitation = child.Q
+
     exploration = c * math.sqrt(
         math.log(parent.visit_count + 1) / child.visit_count
     )

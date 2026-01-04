@@ -1,7 +1,11 @@
-"""Routing state representation.
+"""Physical routing state representation.
 
-Note: RoutingState is NOT hashable in MCTS context.
+Note: PhysicalRoutingState is NOT hashable in MCTS context.
 It's a derived artifact used only for reward computation.
+
+IMPORTANT: This is DIFFERENT from diffusion.model.RoutingState which
+represents soft probability distributions over PIPs during denoising.
+This class represents concrete wire assignments after decoding.
 """
 
 from dataclasses import dataclass, field
@@ -27,7 +31,7 @@ class WireSegment:
 
 
 @dataclass
-class RoutingState:
+class PhysicalRoutingState:
     """Routing state (mutable, NOT hashable).
     
     This is used for:
@@ -76,9 +80,9 @@ class RoutingState:
         route_set = set(route)
         return pin_positions.issubset(route_set)
     
-    def copy(self) -> 'RoutingState':
+    def copy(self) -> 'PhysicalRoutingState':
         """Create a deep copy of the routing state."""
-        return RoutingState(
+        return PhysicalRoutingState(
             grid=self.grid,
             netlist=self.netlist,
             wires=self.wires.copy(),
@@ -87,7 +91,12 @@ class RoutingState:
         )
     
     def __repr__(self) -> str:
-        routed_nets = sum(1 for net_id in self.net_routes.keys() 
+        routed_nets = sum(1 for net_id in self.net_routes.keys()
                          if self.is_net_routed(net_id))
-        return f"RoutingState({routed_nets}/{len(self.netlist)} nets routed, {len(self.wires)} wires)"
+        return f"PhysicalRoutingState({routed_nets}/{len(self.netlist)} nets routed, {len(self.wires)} wires)"
+
+
+# Backwards compatibility alias (deprecated - use PhysicalRoutingState instead)
+# This allows gradual migration of test files
+RoutingState = PhysicalRoutingState
 

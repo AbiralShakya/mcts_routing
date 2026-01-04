@@ -4,7 +4,7 @@ import subprocess
 import json
 import os
 from typing import List, Dict, Optional
-from ...core.routing.state import RoutingState
+from ...core.routing.state import PhysicalRoutingState
 from ...core.routing.grid import Grid
 from ...core.routing.netlist import Netlist
 from ...core.routing.constraints import DRCViolation
@@ -23,7 +23,7 @@ class NextPNRValidator:
     
     def validate_routing(
         self,
-        routing_state: RoutingState,
+        routing_state: PhysicalRoutingState,
         grid: Grid,
         netlist: Netlist,
         temp_file: Optional[str] = None
@@ -126,7 +126,7 @@ class NextPNRValidator:
         
         return violations
     
-    def _compute_wirelength(self, routing_state: RoutingState) -> float:
+    def _compute_wirelength(self, routing_state: PhysicalRoutingState) -> float:
         """Compute total wirelength.
         
         Args:
@@ -145,7 +145,7 @@ class NextPNRValidator:
 
 
 def validate_routing(
-    routing_state: RoutingState,
+    routing_state: PhysicalRoutingState,
     grid: Grid,
     netlist: Netlist
 ) -> Dict:

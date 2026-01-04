@@ -1,89 +1,67 @@
-"""Diffusion-MCTS Placer for nextpnr-xilinx.
+"""Diffusion-MCTS Router for nextpnr-xilinx.
 
-Replaces simulated annealing with diffusion + MCTS.
+Replaces traditional routing with diffusion + MCTS.
 Core loop:
-1. Rollout: Denoise from noise → placement
+1. Rollout: Denoise from noise → routing candidate
 2. Prune: Critic predicts bad paths early, kill them
 3. Score: Route survivors with real nextpnr router
 4. Backprop: UCB updates back to root
 
 Components:
 - diffusion/ - Denoising model, netlist-conditioned
-- critic/ - GNN predicting routability from partial placement
+- critic/ - GNN predicting routability from partial routing
 - mcts/ - Tree, UCB selection, backprop
-- bridge/ - C++ bindings to nextpnr router
+- bridge/ - Interface to nextpnr router
 """
 
 __version__ = "0.2.0"
 
-from .mcts.search import MCTSPlacer, PlacerConfig, iterate
-from .diffusion.model import PlacementDiffusion, PlacementState
-from .critic.gnn import RoutabilityCritic
-from .bridge.router import NextPNRRouter
+# Lazy imports to avoid circular dependencies
+# Use explicit imports in user code instead of relying on __init__.py
 
 __all__ = [
-    "MCTSPlacer",
-    "PlacerConfig",
+    "MCTSRouter",
+    "RouterConfig",
     "iterate",
-    "PlacementDiffusion",
-    "PlacementState",
-    "RoutabilityCritic",
+    "RoutingDiffusion",
+    "RoutingState",
+    "RoutingCritic",
     "NextPNRRouter"
 ]
 
 
-def run_placer(design_path: str, output_path: str, **kwargs):
-    """High-level API to run the placer.
+def get_mcts_router():
+    """Get MCTSRouter class."""
+    from .mcts.search import MCTSRouter
+    return MCTSRouter
 
-    Args:
-        design_path: Path to nextpnr design JSON
-        output_path: Path to write placed design
-        **kwargs: Placer configuration options
 
-    Returns:
-        Placement result
-    """
-    from .integration.nextpnr.reader import NextPNRReader
-    from .bridge.placement_io import export_placement
+def get_router_config():
+    """Get RouterConfig class."""
+    from .mcts.search import RouterConfig
+    return RouterConfig
 
-    config = PlacerConfig(**kwargs)
-    reader = NextPNRReader()
 
-    # Read design
-    grid, netlist, _, _ = reader.read_all(design_path)
+def get_routing_diffusion():
+    """Get RoutingDiffusion class."""
+    from .diffusion.model import RoutingDiffusion
+    return RoutingDiffusion
 
-    # Create components
-    diffusion = PlacementDiffusion(
-        hidden_dim=config.hidden_dim,
-        num_layers=config.num_layers
-    )
-    critic = RoutabilityCritic(
-        hidden_dim=config.critic_hidden_dim,
-        num_layers=config.critic_num_layers
-    )
-    router = NextPNRRouter(
-        nextpnr_path=config.nextpnr_path,
-        chipdb_path=config.chipdb_path,
-        timeout_seconds=config.router_timeout
-    )
 
-    # Create placer and run
-    placer = MCTSPlacer(
-        diffusion=diffusion,
-        critic=critic,
-        router=router,
-        grid=grid,
-        netlist=netlist,
-        ucb_c=config.ucb_c,
-        critic_threshold=config.critic_threshold,
-        max_simulations=config.max_simulations,
-        device=config.device
-    )
+def get_routing_state():
+    """Get RoutingState class."""
+    from .diffusion.model import RoutingState
+    return RoutingState
 
-    placement = placer.search()
 
-    # Write output
-    export_placement(placement, netlist, grid, output_path)
+def get_routing_critic():
+    """Get RoutingCritic class."""
+    from .critic.gnn import RoutingCritic
+    return RoutingCritic
 
-    return placement
+
+def get_nextpnr_router():
+    """Get NextPNRRouter class."""
+    from .bridge.router import NextPNRRouter
+    return NextPNRRouter
 

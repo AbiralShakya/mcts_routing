@@ -2,7 +2,7 @@
 
 import json
 from typing import List, Dict
-from ...core.routing.state import RoutingState
+from ...core.routing.state import PhysicalRoutingState
 
 
 class NextPNRWriter:
@@ -10,7 +10,7 @@ class NextPNRWriter:
     
     def write_routes(
         self,
-        routing_state: RoutingState,
+        routing_state: PhysicalRoutingState,
         file_path: str,
         format: str = "json"
     ) -> None:
@@ -30,7 +30,7 @@ class NextPNRWriter:
     
     def _write_json(
         self,
-        routing_state: RoutingState,
+        routing_state: PhysicalRoutingState,
         file_path: str
     ) -> None:
         """Write routes in JSON format.
@@ -76,7 +76,7 @@ class NextPNRWriter:
     
     def _write_nextpnr_format(
         self,
-        routing_state: RoutingState,
+        routing_state: PhysicalRoutingState,
         file_path: str
     ) -> None:
         """Write routes in nextpnr's native format.
@@ -112,7 +112,7 @@ class NextPNRWriter:
             f.write('\n'.join(lines))
 
 
-def write_routes(routing_state: RoutingState, file_path: str) -> None:
+def write_routes(routing_state: PhysicalRoutingState, file_path: str) -> None:
     """Convenience function to write routes."""
     writer = NextPNRWriter()
     writer.write_routes(routing_state, file_path, format="json")

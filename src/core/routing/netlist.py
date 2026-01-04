@@ -1,7 +1,7 @@
 """Netlist representation."""
 
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 
 
 @dataclass(frozen=True)

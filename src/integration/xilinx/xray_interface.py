@@ -4,7 +4,7 @@ For Xilinx 7-series/UltraScale+: map routes to Xilinx routing primitives.
 """
 
 from typing import Dict, List, Tuple, Optional
-from ...core.routing.state import RoutingState
+from ...core.routing.state import PhysicalRoutingState
 from ...core.routing.grid import Grid
 
 
@@ -22,7 +22,7 @@ class XilinxXRayInterface:
     
     def convert_to_xilinx_format(
         self,
-        routing_state: RoutingState,
+        routing_state: PhysicalRoutingState,
         grid: Grid
     ) -> Dict:
         """Convert routing state to Xilinx format.
@@ -63,7 +63,7 @@ class XilinxXRayInterface:
     
     def export_to_fasm(
         self,
-        routing_state: RoutingState,
+        routing_state: PhysicalRoutingState,
         grid: Grid,
         output_path: str
     ) -> None:
@@ -85,7 +85,7 @@ class XilinxXRayInterface:
     
     def export_to_bitstream(
         self,
-        routing_state: RoutingState,
+        routing_state: PhysicalRoutingState,
         grid: Grid,
         output_path: str
     ) -> None:
@@ -107,7 +107,7 @@ class XilinxXRayInterface:
 
 
 def convert_to_xilinx_format(
-    routing_state: RoutingState,
+    routing_state: PhysicalRoutingState,
     grid: Grid
 ) -> Dict:
     """Convenience function to convert to Xilinx format."""

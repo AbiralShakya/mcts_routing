@@ -36,6 +36,28 @@ class RoutingNode:
         return self.total_value / self.visit_count
 
     @property
+    def Q_normalized(self) -> float:
+        """Time-aware normalized Q-value.
+
+        Scales Q by timestep uncertainty:
+        - Early timesteps (high t) = more uncertain = higher exploration bonus
+        - Late timesteps (low t) = more committed = trust Q more
+
+        This helps UCB balance exploration across tree depths.
+        """
+        base_Q = self.Q
+        max_timesteps = 1000  # Assume standard diffusion schedule
+
+        # Time scale: 0 at t=0, 1 at t=max_timesteps
+        time_scale = self.t / max_timesteps
+
+        # Uncertainty multiplier: earlier = more uncertain
+        # sqrt scaling for smoother transition
+        uncertainty = 1.0 + 0.5 * (time_scale ** 0.5)
+
+        return base_Q * uncertainty
+
+    @property
     def t(self) -> int:
         """Shorthand for timestep."""
         return self.state.timestep

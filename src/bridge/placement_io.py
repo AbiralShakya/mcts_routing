@@ -10,7 +10,7 @@ from pathlib import Path
 from ..core.routing.placement import Placement
 from ..core.routing.netlist import Netlist, Net, Pin
 from ..core.routing.grid import Grid
-from ..core.routing.state import RoutingState, WireSegment
+from ..core.routing.state import PhysicalRoutingState, WireSegment
 
 
 def export_placement(
@@ -129,7 +129,7 @@ def import_routing(
     routing_path: str,
     grid: Grid,
     netlist: Netlist
-) -> RoutingState:
+) -> PhysicalRoutingState:
     """Import routing result from nextpnr.
 
     Args:
@@ -143,7 +143,7 @@ def import_routing(
     with open(routing_path, 'r') as f:
         data = json.load(f)
 
-    routing_state = RoutingState(grid=grid, netlist=netlist)
+    routing_state = PhysicalRoutingState(grid=grid, netlist=netlist)
 
     # Parse routed nets
     routes = data.get("routes", data.get("routing", {}))
@@ -160,7 +160,7 @@ def import_routing(
 
 def _parse_route(
     route_data: Dict[str, Any],
-    routing_state: RoutingState,
+    routing_state: PhysicalRoutingState,
     net_name: Optional[str] = None
 ) -> None:
     """Parse single net route."""

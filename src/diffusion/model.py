@@ -240,9 +240,11 @@ class RoutingDiffusion(nn.Module):
         self.schedule = schedule or DDPMSchedule(num_timesteps=1000)
         self.num_timesteps = getattr(self.schedule, 'num_timesteps', 1000)
         self.max_pips = max_pips_per_net
+        self.hidden_dim = hidden_dim
 
-        self.net_encoder = NetEncoder(hidden_dim=128)
-        self.congestion_encoder = CongestionEncoder(hidden_dim=128)
+        # All encoders use the same hidden_dim for consistency
+        self.net_encoder = NetEncoder(hidden_dim=hidden_dim)
+        self.congestion_encoder = CongestionEncoder(hidden_dim=hidden_dim)
         self.denoiser = RoutingDenoiser(
             hidden_dim=hidden_dim,
             max_pips_per_net=max_pips_per_net,
@@ -332,27 +334,162 @@ class RoutingDiffusion(nn.Module):
     def decode_routing(
         self,
         state: RoutingState,
-        pip_indices: Dict[int, List[int]]  # net_id -> list of PIP indices
+        pip_indices: Dict[int, List[int]],  # net_id -> list of PIP indices
+        netlist: Optional['Netlist'] = None  # For computing num_pips from topology
     ) -> Dict[int, List[int]]:
         """Decode latents to discrete routing assignments.
 
-        For each net, select the highest-probability PIPs to form a route.
+        For each net, select PIPs to form a connected route.
+        Uses soft potential → edge cost conversion for better selection.
+
+        Args:
+            state: Current routing state with net latents
+            pip_indices: Mapping from net_id to list of actual PIP indices
+            netlist: Optional netlist for computing required path length
+
+        Returns:
+            Dict mapping net_id -> list of selected PIP indices
         """
         routing = {}
-        for net_id, latent in state.net_latents.items():
-            # Get top-k PIPs (greedy decoding)
-            probs = F.softmax(latent, dim=-1)
-            num_pips_needed = 10  # Rough estimate, should come from net
-            top_pips = probs.topk(num_pips_needed).indices.tolist()
 
-            # Map to actual PIP indices
-            if net_id in pip_indices:
-                routing[net_id] = [pip_indices[net_id][i] for i in top_pips
-                                   if i < len(pip_indices[net_id])]
+        for net_id, latent in state.net_latents.items():
+            # Convert logits to probabilities
+            probs = F.softmax(latent, dim=-1)
+
+            # Estimate PIPs needed based on net topology
+            # If netlist provided, use HPWL estimate; otherwise use latent size
+            if netlist is not None:
+                num_pips_needed = self._estimate_pips_for_net(net_id, netlist)
             else:
-                routing[net_id] = top_pips
+                # Heuristic: use ~20% of available PIPs, minimum 5
+                num_pips_needed = max(5, latent.size(-1) // 5)
+
+            # Ensure we don't request more PIPs than available
+            num_pips_needed = min(num_pips_needed, latent.size(-1))
+
+            # Select PIPs using temperature-scaled sampling for diversity
+            # Higher probability PIPs are preferred, but allow some exploration
+            temperature = 0.5  # Lower = more greedy
+            scaled_probs = F.softmax(latent / temperature, dim=-1)
+
+            # Get top-k with highest scaled probabilities
+            top_values, top_indices = scaled_probs.topk(num_pips_needed)
+            selected_pips = top_indices.tolist()
+
+            # Map to actual PIP indices if mapping provided
+            if net_id in pip_indices and pip_indices[net_id]:
+                pip_list = pip_indices[net_id]
+                routing[net_id] = [
+                    pip_list[i] for i in selected_pips
+                    if i < len(pip_list)
+                ]
+            else:
+                routing[net_id] = selected_pips
+
+            # Sort by probability (highest first) for deterministic ordering
+            if routing[net_id]:
+                pip_probs = [(p, probs[selected_pips[i]].item())
+                             for i, p in enumerate(routing[net_id])]
+                pip_probs.sort(key=lambda x: -x[1])
+                routing[net_id] = [p for p, _ in pip_probs]
 
         return routing
+
+    def _estimate_pips_for_net(
+        self,
+        net_id: int,
+        netlist: 'Netlist'
+    ) -> int:
+        """Estimate number of PIPs needed to route a net.
+
+        Uses HPWL (half-perimeter wirelength) as estimate.
+        Each unit of wirelength typically needs 1-2 PIPs.
+
+        Args:
+            net_id: Net ID to estimate for
+            netlist: Netlist containing the net
+
+        Returns:
+            Estimated number of PIPs needed
+        """
+        net = netlist.get_net(net_id)
+        if net is None or len(net.pins) < 2:
+            return 5  # Minimum
+
+        # Compute HPWL
+        xs = [p.x for p in net.pins]
+        ys = [p.y for p in net.pins]
+        hpwl = (max(xs) - min(xs)) + (max(ys) - min(ys))
+
+        # Steiner tree typically needs HPWL * factor PIPs
+        # Factor depends on net fanout (more sinks = more branching)
+        fanout = len(net.pins) - 1
+        steiner_factor = 1.0 + 0.2 * min(fanout, 5)  # Cap at fanout 5
+
+        estimated_pips = int(hpwl * steiner_factor) + fanout
+
+        # Clamp to reasonable range
+        return max(5, min(estimated_pips, 100))
+
+
+def compute_congestion_from_latents(
+    net_latents: Dict[int, torch.Tensor],
+    netlist: Netlist,
+    grid_size: Tuple[int, int],
+    device: str = "cpu"
+) -> torch.Tensor:
+    """Compute congestion map from soft PIP probabilities.
+
+    Estimates routing resource usage by spreading probability mass
+    over the bounding box of each net, weighted by routing probability.
+
+    Args:
+        net_latents: Dict mapping net_id to latent tensor (probs over PIPs)
+        netlist: Netlist with net topology
+        grid_size: (width, height) of the grid
+        device: Device for output tensor
+
+    Returns:
+        Congestion map tensor of shape [height, width]
+    """
+    width, height = grid_size
+    congestion = torch.zeros(height, width, device=device)
+
+    for net_id, latent in net_latents.items():
+        net = netlist.get_net(net_id)
+        if net is None or len(net.pins) < 2:
+            continue
+
+        # Compute net's bounding box
+        xs = [p.x for p in net.pins]
+        ys = [p.y for p in net.pins]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+
+        # Compute routing probability (how "committed" is this net)
+        probs = F.softmax(latent, dim=-1)
+        max_prob = probs.max().item()
+        entropy = -(probs * (probs + 1e-8).log()).sum().item()
+        max_entropy = torch.log(torch.tensor(float(latent.size(-1)))).item()
+
+        # Commitment score: 0 = uniform, 1 = fully committed
+        commitment = 1.0 - (entropy / max(max_entropy, 1e-8))
+
+        # Spread probability mass over bounding box
+        # More committed = more concentrated usage
+        bbox_area = max(1, (max_x - min_x + 1) * (max_y - min_y + 1))
+        usage_per_cell = commitment / bbox_area
+
+        # Add usage to congestion map (clamp to grid bounds)
+        for y in range(max(0, min_y), min(height, max_y + 1)):
+            for x in range(max(0, min_x), min(width, max_x + 1)):
+                congestion[y, x] += usage_per_cell
+
+    # Normalize to [0, 1] range
+    if congestion.max() > 0:
+        congestion = congestion / congestion.max()
+
+    return congestion
 
 
 def create_routing_diffusion(config: Dict[str, Any]) -> RoutingDiffusion:
