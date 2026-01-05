@@ -154,7 +154,13 @@ class CriticTrainer:
 
             # Forward
             self.optimizer.zero_grad()
-            predictions = self.critic(graph)
+            # Pass None for shared encoder inputs (will be enhanced when data includes these)
+            predictions = self.critic(
+                graph,
+                net_features=None,
+                net_positions=None,
+                congestion_map=None
+            )
 
             # Loss
             loss = self.criterion(predictions, targets)
@@ -203,7 +209,12 @@ class CriticTrainer:
                 )
                 targets = targets.to(self.device)
 
-                predictions = self.critic(graph)
+                predictions = self.critic(
+                    graph,
+                    net_features=None,
+                    net_positions=None,
+                    congestion_map=None
+                )
 
                 loss = self.criterion(predictions, targets)
                 total_loss += loss.item()

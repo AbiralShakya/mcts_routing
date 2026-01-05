@@ -4,12 +4,12 @@
 cluster:
   name: "della"
   partition: "gpu"
-  num_gpus: 4
+  num_gpus: 1
   nodes: 1
 
-# Distributed training
+# Distributed training (disabled for single-GPU)
 distributed:
-  enabled: true
+  enabled: false
   backend: "nccl"
   init_method: "env://"
 
@@ -20,10 +20,18 @@ model:
   hidden_dim: 128
   num_layers: 4
   dropout: 0.1
+  net_feat_dim: 7  # Must match diffusion model net_feat_dim
+  
+# Shared encoder settings
+shared_encoders:
+  use_shared_encoders: true  # Set to true to use shared encoders from diffusion model
+  diffusion_checkpoint: null  # Path to diffusion checkpoint to load shared encoders from
+  # If null, will create new shared encoders
+  # If provided, will load encoder weights from diffusion checkpoint
 
 # Training
 training:
-  batch_size: 64  # Larger batch for 4 GPUs
+  batch_size: 16  # Smaller batch for single GPU
   num_epochs: 100
   learning_rate: 1.0e-4
   weight_decay: 1.0e-5

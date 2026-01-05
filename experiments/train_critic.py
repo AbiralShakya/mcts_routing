@@ -12,6 +12,7 @@ import os
 from src.critic.training import CriticTrainer, RoutingDataset, collate_routing_graphs
 from src.critic.gnn import RoutingCritic
 from src.critic.features import RoutingGraphBuilder
+from src.shared.encoders import create_shared_encoders
 from src.utils.seed import set_seed
 from src.utils.logging import setup_logging
 
@@ -53,6 +54,55 @@ def main():
     if args.data_dir:
         config.setdefault('data', {})['data_dir'] = args.data_dir
     
+    # Create shared encoders (optional - can load from diffusion checkpoint)
+    use_shared_encoders = config.get('model', {}).get('use_shared_encoders', False)
+    shared_net_encoder = None
+    shared_congestion_encoder = None
+    
+    if use_shared_encoders:
+        # Option 1: Load from diffusion checkpoint
+        diffusion_checkpoint = config.get('model', {}).get('diffusion_checkpoint', None)
+        if diffusion_checkpoint and Path(diffusion_checkpoint).exists():
+            logger.info(f"Loading shared encoders from diffusion checkpoint: {diffusion_checkpoint}")
+            checkpoint = torch.load(diffusion_checkpoint, map_location='cpu')
+            # Extract encoder state dicts (assuming they're stored with these keys)
+            # This depends on how the diffusion model saves its state
+            # For now, create new encoders and we'll load weights if available
+            model_config = config.get('model', {})
+            hidden_dim = model_config.get('hidden_dim', 128)
+            net_feat_dim = model_config.get('net_feat_dim', 7)
+            shared_net_encoder, shared_congestion_encoder = create_shared_encoders(
+                hidden_dim=hidden_dim,
+                net_feat_dim=net_feat_dim
+            )
+            # Try to load encoder weights from checkpoint
+            # Note: This assumes the checkpoint contains encoder state dicts
+            # You may need to adjust key names based on actual checkpoint structure
+            if 'model_state_dict' in checkpoint:
+                state_dict = checkpoint['model_state_dict']
+                # Try to load net encoder weights
+                net_encoder_dict = {k.replace('net_encoder.', ''): v 
+                                   for k, v in state_dict.items() 
+                                   if k.startswith('net_encoder.')}
+                if net_encoder_dict:
+                    shared_net_encoder.load_state_dict(net_encoder_dict, strict=False)
+                # Try to load congestion encoder weights
+                cong_encoder_dict = {k.replace('congestion_encoder.', ''): v 
+                                   for k, v in state_dict.items() 
+                                   if k.startswith('congestion_encoder.')}
+                if cong_encoder_dict:
+                    shared_congestion_encoder.load_state_dict(cong_encoder_dict, strict=False)
+        else:
+            # Option 2: Create new shared encoders
+            logger.info("Creating new shared encoders")
+            model_config = config.get('model', {})
+            hidden_dim = model_config.get('hidden_dim', 128)
+            net_feat_dim = model_config.get('net_feat_dim', 7)
+            shared_net_encoder, shared_congestion_encoder = create_shared_encoders(
+                hidden_dim=hidden_dim,
+                net_feat_dim=net_feat_dim
+            )
+    
     # Create critic model
     model_config = config.get('model', {})
     critic = RoutingCritic(
@@ -60,7 +110,10 @@ def main():
         edge_dim=model_config.get('edge_dim', 32),
         hidden_dim=model_config.get('hidden_dim', 128),
         num_layers=model_config.get('num_layers', 4),
-        dropout=model_config.get('dropout', 0.1)
+        dropout=model_config.get('dropout', 0.1),
+        shared_net_encoder=shared_net_encoder,
+        shared_congestion_encoder=shared_congestion_encoder,
+        net_feat_dim=model_config.get('net_feat_dim', 7)
     )
     
     # Create trainer
@@ -154,7 +207,15 @@ def main():
                 graph = graph.to(trainer.device)
                 scores = scores.to(trainer.device)
                 
-                pred = trainer.critic(graph)
+                # For shared encoders, we need net_features, net_positions, congestion_map
+                # These should be extracted from the examples if available
+                # For now, pass None (will use graph-only features)
+                pred = trainer.critic(
+                    graph,
+                    net_features=None,  # TODO: Extract from examples if using shared encoders
+                    net_positions=None,
+                    congestion_map=None
+                )
                 loss = trainer.criterion(pred, scores)
                 val_loss += loss.item()
                 val_count += 1

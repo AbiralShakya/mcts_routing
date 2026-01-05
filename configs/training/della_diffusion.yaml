@@ -5,12 +5,12 @@
 cluster:
   name: "della"
   partition: "gpu"
-  num_gpus: 8
+  num_gpus: 1
   nodes: 1
 
-# Distributed training
+# Distributed training (disabled for single-GPU)
 distributed:
-  enabled: true
+  enabled: false
   backend: "nccl"
   init_method: "env://"
 
@@ -22,10 +22,16 @@ model:
   max_pips_per_net: 1000
   num_heads: 8
   dropout: 0.1
+  net_feat_dim: 7  # Dimension of net feature vectors
+  
+# Shared encoder settings (for joint training with critic)
+shared_encoders:
+  enabled: true  # Set to true to use shared encoders
+  # If enabled, encoders will be created and can be shared with critic model
 
-# Training (larger batch for multi-GPU)
+# Training (single-GPU batch size)
 training:
-  batch_size: 256  # Larger batch for 8 GPUs
+  batch_size: 32  # Smaller batch for single GPU
   num_epochs: 200
   learning_rate: 1.0e-4
   weight_decay: 1.0e-5

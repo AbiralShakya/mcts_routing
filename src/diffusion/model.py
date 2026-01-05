@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from .schedule import NoiseSchedule, DDPMSchedule
 from ..core.routing.netlist import Netlist, Net
 from ..core.routing.grid import Grid
+from ..shared.encoders import SharedNetEncoder, SharedCongestionEncoder
 
 
 @dataclass
@@ -237,6 +238,8 @@ class RoutingDiffusion(nn.Module):
         hidden_dim: int = 256,
         max_pips_per_net: int = 1000,
         net_feat_dim: int = 7,
+        shared_net_encoder: Optional[SharedNetEncoder] = None,
+        shared_congestion_encoder: Optional[SharedCongestionEncoder] = None,
         **kwargs
     ):
         super().__init__()
@@ -246,9 +249,18 @@ class RoutingDiffusion(nn.Module):
         self.max_pips = max_pips_per_net
         self.hidden_dim = hidden_dim
 
-        # All encoders use the same hidden_dim for consistency
-        self.net_encoder = NetEncoder(hidden_dim=hidden_dim, net_feat_dim=net_feat_dim)
-        self.congestion_encoder = CongestionEncoder(hidden_dim=hidden_dim)
+        # Use shared encoders if provided, otherwise create new ones
+        # This allows backward compatibility and shared training
+        if shared_net_encoder is not None:
+            self.net_encoder = shared_net_encoder
+        else:
+            self.net_encoder = NetEncoder(hidden_dim=hidden_dim, net_feat_dim=net_feat_dim)
+        
+        if shared_congestion_encoder is not None:
+            self.congestion_encoder = shared_congestion_encoder
+        else:
+            self.congestion_encoder = CongestionEncoder(hidden_dim=hidden_dim)
+        
         self.denoiser = RoutingDenoiser(
             hidden_dim=hidden_dim,
             max_pips_per_net=max_pips_per_net,
@@ -268,7 +280,12 @@ class RoutingDiffusion(nn.Module):
 
         # Encode nets
         net_embeds = self.net_encoder(net_features, net_positions)
-        net_embeds = net_embeds.unsqueeze(0).expand(B, -1, -1)
+
+        # Handle both batched [B, num_nets, hidden] and unbatched [num_nets, hidden] inputs
+        if net_embeds.dim() == 2:
+            # Unbatched: expand to batch size
+            net_embeds = net_embeds.unsqueeze(0).expand(B, -1, -1)
+        # If already 3D [B, num_nets, hidden], no expansion needed
 
         # Encode congestion
         cong_embed = self.congestion_encoder(congestion, batch_size=B)
@@ -499,8 +516,18 @@ def compute_congestion_from_latents(
     return congestion
 
 
-def create_routing_diffusion(config: Dict[str, Any]) -> RoutingDiffusion:
-    """Factory function."""
+def create_routing_diffusion(
+    config: Dict[str, Any],
+    shared_net_encoder: Optional[SharedNetEncoder] = None,
+    shared_congestion_encoder: Optional[SharedCongestionEncoder] = None
+) -> RoutingDiffusion:
+    """Factory function.
+    
+    Args:
+        config: Model configuration dictionary
+        shared_net_encoder: Optional shared net encoder (for joint training)
+        shared_congestion_encoder: Optional shared congestion encoder (for joint training)
+    """
     schedule = DDPMSchedule(num_timesteps=config.get("num_timesteps", 1000))
 
     return RoutingDiffusion(
@@ -508,6 +535,8 @@ def create_routing_diffusion(config: Dict[str, Any]) -> RoutingDiffusion:
         hidden_dim=config.get("hidden_dim", 256),
         max_pips_per_net=config.get("max_pips_per_net", 1000),
         net_feat_dim=config.get("net_feat_dim", 7),  # Default 7 to match generated data
+        shared_net_encoder=shared_net_encoder,
+        shared_congestion_encoder=shared_congestion_encoder,
         num_heads=config.get("num_heads", 8),
         num_layers=config.get("num_layers", 6),
         dropout=config.get("dropout", 0.1)

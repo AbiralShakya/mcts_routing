@@ -114,18 +114,26 @@ def routing_to_routing_state(
         
         # Get routing for this net (if available)
         if net_id in routing_result:
-            # Net is routed - create concentrated distribution
-            num_pips = len(routing_result[net_id])
-            # Create one-hot-like distribution (high confidence)
+            # Net is routed - create meaningful distribution
+            # Estimate total candidate PIPs (more than actually used)
+            num_pips = max(len(routing_result[net_id]) * 3, 20)
             latent = torch.zeros(num_pips)
-            # Set high values for routed PIPs
-            latent[:] = 5.0  # High logit = committed
+            
+            # Selected PIPs get high logits (+5), rejected get low logits (-3)
+            selected_pip_indices = set(routing_result[net_id][:len(routing_result[net_id])])
+            for i in range(num_pips):
+                if i in selected_pip_indices:
+                    latent[i] = 5.0 + torch.randn(1).item() * 0.3  # High logit with noise
+                else:
+                    latent[i] = -3.0 + torch.randn(1).item() * 0.3  # Low logit with noise
+            
             routed_nets.add(net_id)
         else:
-            # Net not routed - create uniform distribution
+            # Net not routed - create uniform distribution with slight preference
             # Estimate number of feasible PIPs (simplified)
             num_pips = max(10, len(net.pins) * 5)
-            latent = torch.zeros(num_pips)  # Uniform = low confidence
+            # Slight negative bias (not committed yet)
+            latent = torch.randn(num_pips) * 0.5 - 1.0
         
         net_latents[net_id] = latent
     

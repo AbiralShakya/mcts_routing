@@ -105,7 +105,13 @@ def iterate(
         )
 
         with torch.no_grad():
-            critic_score = critic(graph).item()
+            # Pass net features and congestion for shared encoders
+            critic_score = critic(
+                graph,
+                net_features=net_features,
+                net_positions=net_positions,
+                congestion_map=new_state.congestion_map
+            ).item()
 
         if critic_score < config.critic_threshold:
             # PRUNE: Critic predicts routing failure

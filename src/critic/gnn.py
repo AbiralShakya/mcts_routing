@@ -22,6 +22,8 @@ import torch.nn.functional as F
 from typing import Optional, Tuple, Dict, List
 from dataclasses import dataclass
 
+from ..shared.encoders import SharedNetEncoder, SharedCongestionEncoder
+
 
 @dataclass
 class RoutingGraph:
@@ -110,15 +112,34 @@ class RoutingCritic(nn.Module):
         edge_dim: int = 32,
         hidden_dim: int = 128,
         num_layers: int = 4,
-        dropout: float = 0.1
+        dropout: float = 0.1,
+        shared_net_encoder: Optional[SharedNetEncoder] = None,
+        shared_congestion_encoder: Optional[SharedCongestionEncoder] = None,
+        net_feat_dim: int = 7
     ):
         super().__init__()
         self.node_dim = node_dim
         self.hidden_dim = hidden_dim
 
-        # Input projections
+        # Shared encoders (optional - for joint training)
+        self.shared_net_encoder = shared_net_encoder
+        self.shared_congestion_encoder = shared_congestion_encoder
+        
+        # If shared net encoder provided, use it; otherwise create projection
+        if shared_net_encoder is not None:
+            # Net encoder outputs hidden_dim, so we need to incorporate it
+            # We'll add net embeddings to node features during forward pass
+            self.use_shared_net_encoder = True
+        else:
+            self.use_shared_net_encoder = False
+        
+        # Input projections for graph structure
         self.node_encoder = nn.Linear(node_dim, hidden_dim)
         self.edge_encoder = nn.Linear(edge_dim, hidden_dim)
+        
+        # If using shared congestion encoder, we'll use it directly
+        # Otherwise, congestion is already in node features
+        self.use_shared_congestion = shared_congestion_encoder is not None
 
         # Message passing layers
         self.mp_layers = nn.ModuleList([
@@ -140,9 +161,17 @@ class RoutingCritic(nn.Module):
             nn.Linear(hidden_dim, hidden_dim)
         )
 
+        # Readout input size depends on whether shared encoders are used
+        # Base: graph_embed (hidden_dim) + unrouted_embed (hidden_dim) = hidden_dim * 2
+        readout_input_dim = hidden_dim * 2
+        if self.use_shared_congestion:
+            readout_input_dim += hidden_dim  # congestion embedding
+        if self.use_shared_net_encoder:
+            readout_input_dim += hidden_dim  # net embedding
+        
         # Readout: graph embedding → value
         self.readout = nn.Sequential(
-            nn.Linear(hidden_dim * 2, hidden_dim),  # *2 for graph + unrouted
+            nn.Linear(readout_input_dim, hidden_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
             nn.Linear(hidden_dim, hidden_dim // 2),
@@ -151,11 +180,20 @@ class RoutingCritic(nn.Module):
             nn.Sigmoid()
         )
 
-    def forward(self, graph: RoutingGraph) -> torch.Tensor:
+    def forward(
+        self,
+        graph: RoutingGraph,
+        net_features: Optional[torch.Tensor] = None,
+        net_positions: Optional[torch.Tensor] = None,
+        congestion_map: Optional[torch.Tensor] = None
+    ) -> torch.Tensor:
         """Predict routing success probability.
 
         Args:
             graph: RoutingGraph with partial routing state
+            net_features: Optional net features [num_nets, net_feat_dim] for shared encoder
+            net_positions: Optional net positions [num_nets, 4] for shared encoder
+            congestion_map: Optional congestion map [H, W] for shared encoder
 
         Returns:
             Value in [0, 1]
@@ -182,25 +220,54 @@ class RoutingCritic(nn.Module):
         unrouted_frac = graph.unrouted_mask.float().mean().unsqueeze(0).unsqueeze(0)
         unrouted_embed = self.unrouted_encoder(unrouted_frac)
 
-        # Combine and predict
-        combined = torch.cat([graph_embed, unrouted_embed], dim=-1)
+        # Use shared encoders if available
+        shared_embeds = []
+        
+        if self.use_shared_congestion and congestion_map is not None:
+            # Get global congestion embedding from shared encoder
+            batch_size = graph_embed.size(0)
+            congestion_embed = self.shared_congestion_encoder(congestion_map, batch_size=batch_size)
+            shared_embeds.append(congestion_embed)
+        
+        if self.use_shared_net_encoder and net_features is not None and net_positions is not None:
+            # Get net-level embeddings and aggregate
+            net_embeds = self.shared_net_encoder(net_features, net_positions)
+            # Aggregate net embeddings (mean pooling)
+            if net_embeds.dim() == 2:
+                # [num_nets, hidden_dim] -> [1, hidden_dim]
+                net_embed = net_embeds.mean(dim=0, keepdim=True)
+            else:
+                # [B, num_nets, hidden_dim] -> [B, hidden_dim]
+                net_embed = net_embeds.mean(dim=1)
+            shared_embeds.append(net_embed)
+
+        # Combine embeddings
+        all_embeds = [graph_embed, unrouted_embed] + shared_embeds
+        combined = torch.cat(all_embeds, dim=-1)
+
         return self.readout(combined).squeeze(-1)
 
     def predict_routability(
         self,
         graph: RoutingGraph,
-        threshold: float = 0.5
+        threshold: float = 0.5,
+        net_features: Optional[torch.Tensor] = None,
+        net_positions: Optional[torch.Tensor] = None,
+        congestion_map: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, bool]:
         """Predict with pruning decision.
 
         Args:
             graph: Routing state
             threshold: Pruning threshold
+            net_features: Optional net features for shared encoder
+            net_positions: Optional net positions for shared encoder
+            congestion_map: Optional congestion map for shared encoder
 
         Returns:
             (score, should_prune)
         """
-        score = self.forward(graph)
+        score = self.forward(graph, net_features, net_positions, congestion_map)
         should_prune = score.item() < threshold
         return score, should_prune
 

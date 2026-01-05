@@ -12,6 +12,7 @@ import os
 from src.training.routing_trainer import RoutingDiffusionTrainer
 from src.data.routing_dataset import RoutingStateDataset, collate_routing_states
 from src.diffusion import RoutingDiffusion, create_routing_diffusion
+from src.shared.encoders import create_shared_encoders
 from src.utils.seed import set_seed
 from src.utils.logging import setup_logging
 
@@ -55,7 +56,28 @@ def main():
     
     # Create model
     model_config = config.get('model', {})
-    model = create_routing_diffusion(model_config)
+    
+    # Check if shared encoders should be used
+    shared_encoders_config = config.get('shared_encoders', {})
+    use_shared = shared_encoders_config.get('enabled', False)
+    
+    shared_net_encoder = None
+    shared_congestion_encoder = None
+    
+    if use_shared:
+        logger.info("Creating shared encoders for diffusion model")
+        hidden_dim = model_config.get('hidden_dim', 256)
+        net_feat_dim = model_config.get('net_feat_dim', 7)
+        shared_net_encoder, shared_congestion_encoder = create_shared_encoders(
+            hidden_dim=hidden_dim,
+            net_feat_dim=net_feat_dim
+        )
+    
+    model = create_routing_diffusion(
+        model_config,
+        shared_net_encoder=shared_net_encoder,
+        shared_congestion_encoder=shared_congestion_encoder
+    )
     
     # Create trainer
     trainer = RoutingDiffusionTrainer(model, config, device=None)

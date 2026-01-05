@@ -38,23 +38,48 @@ class RoutingDiffusionTrainer:
             device: Device (if None, auto-detect)
         """
         self.config = config
-        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        
-        self.model = model.to(self.device)
-        
-        # DDP setup
+
+        # DDP setup - get rank/world_size from SLURM or env
         self.use_ddp = config.get('distributed', {}).get('enabled', False)
         if self.use_ddp:
-            self.rank = int(os.environ.get('RANK', 0))
-            self.world_size = int(os.environ.get('WORLD_SIZE', 1))
-            dist.init_process_group(
-                backend=config.get('distributed', {}).get('backend', 'nccl'),
-                init_method=config.get('distributed', {}).get('init_method', 'env://')
-            )
-            self.model = DDP(self.model, device_ids=[self.rank])
+            # Get rank from SLURM_PROCID (set by srun) or RANK env var
+            self.rank = int(os.environ.get('SLURM_PROCID', os.environ.get('RANK', 0)))
+            self.local_rank = int(os.environ.get('SLURM_LOCALID', os.environ.get('LOCAL_RANK', 0)))
+            self.world_size = int(os.environ.get('SLURM_NTASKS', os.environ.get('WORLD_SIZE', 1)))
+
+            # SLURM sets CUDA_VISIBLE_DEVICES so each process only sees its GPU(s)
+            # Use device 0 relative to visible devices, not local_rank
+            if torch.cuda.is_available():
+                num_gpus = torch.cuda.device_count()
+                # Use modulo to handle case where local_rank >= num_gpus
+                gpu_id = self.local_rank % num_gpus if num_gpus > 0 else 0
+                torch.cuda.set_device(gpu_id)
+                self.device = torch.device(f"cuda:{gpu_id}")
+            else:
+                self.device = torch.device("cpu")
+
+            # Set environment variables for torch.distributed
+            os.environ['RANK'] = str(self.rank)
+            os.environ['LOCAL_RANK'] = str(self.local_rank)
+            os.environ['WORLD_SIZE'] = str(self.world_size)
+
+            # Initialize process group
+            if not dist.is_initialized():
+                dist.init_process_group(
+                    backend=config.get('distributed', {}).get('backend', 'nccl'),
+                    init_method=config.get('distributed', {}).get('init_method', 'env://')
+                )
+
+            self.model = model.to(self.device)
+            # Use gpu_id for DDP device_ids since that's what's visible
+            gpu_id = self.local_rank % torch.cuda.device_count() if torch.cuda.is_available() and torch.cuda.device_count() > 0 else 0
+            self.model = DDP(self.model, device_ids=[gpu_id] if torch.cuda.is_available() else None)
         else:
             self.rank = 0
+            self.local_rank = 0
             self.world_size = 1
+            self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            self.model = model.to(self.device)
         
         # Optimizer
         self.optimizer = torch.optim.AdamW(
@@ -116,38 +141,44 @@ class RoutingDiffusionTrainer:
             # Forward diffusion: add noise to net latents
             net_latents_batch = []
             noise_batch = []
-            
+            pip_mask_batch = []  # Track which pip positions are valid
+
             for i, state in enumerate(routing_states):
                 # Stack all net latents into single tensor
                 net_ids = sorted(state.net_latents.keys())
                 max_pips = max(len(state.net_latents[nid]) for nid in net_ids) if net_ids else 100
-                
+
                 latents = torch.zeros(len(net_ids), max_pips, device=self.device)
                 noise = torch.zeros(len(net_ids), max_pips, device=self.device)
-                
+                mask = torch.zeros(len(net_ids), max_pips, device=self.device)
+
                 for j, net_id in enumerate(net_ids):
                     latent = state.net_latents[net_id].to(self.device)
                     n = len(latent)
                     latents[j, :n] = latent
-                    
-                    # Sample noise
+                    mask[j, :n] = 1.0  # Mark valid pip positions
+
+                    # Sample noise only for valid positions
                     n_noise = torch.randn_like(latent)
                     noise[j, :n] = n_noise
-                
+
                 net_latents_batch.append(latents)
                 noise_batch.append(noise)
-            
+                pip_mask_batch.append(mask)
+
             # Pad to same size for batching
             max_nets = max(lat.shape[0] for lat in net_latents_batch)
             max_pips = max(lat.shape[1] for lat in net_latents_batch)
-            
+
             net_latents_padded = torch.zeros(B, max_nets, max_pips, device=self.device)
             noise_padded = torch.zeros(B, max_nets, max_pips, device=self.device)
-            
-            for i, (lat, n) in enumerate(zip(net_latents_batch, noise_batch)):
+            pip_mask_padded = torch.zeros(B, max_nets, max_pips, device=self.device)
+
+            for i, (lat, n, m) in enumerate(zip(net_latents_batch, noise_batch, pip_mask_batch)):
                 n_nets, n_pips = lat.shape
                 net_latents_padded[i, :n_nets, :n_pips] = lat
                 noise_padded[i, :n_nets, :n_pips] = n
+                pip_mask_padded[i, :n_nets, :n_pips] = m
             
             # Forward diffusion: q(x_t | x_0)
             alpha_bar_t = self.model.schedule.get_alpha_bar(t)
@@ -165,10 +196,10 @@ class RoutingDiffusionTrainer:
                 congestion=None  # Could add congestion conditioning
             )
             
-            # Compute loss (only on valid regions)
-            # Mask out padding
-            valid_mask = (net_latents_padded.abs().sum(dim=-1) > 0).unsqueeze(-1)  # [B, max_nets, 1]
-            loss = ((predicted_noise - noise_padded) ** 2 * valid_mask).sum() / valid_mask.sum()
+            # Compute loss (only on valid pip positions)
+            # Use pip-level mask to only count actual data positions
+            num_valid_pips = pip_mask_padded.sum().clamp(min=1)
+            loss = ((predicted_noise - noise_padded) ** 2 * pip_mask_padded).sum() / num_valid_pips
             
             # Backward
             self.optimizer.zero_grad()
@@ -223,42 +254,49 @@ class RoutingDiffusionTrainer:
                 # Forward diffusion (same as training)
                 net_latents_batch = []
                 noise_batch = []
-                
+                pip_mask_batch = []
+
                 for state in routing_states:
                     net_ids = sorted(state.net_latents.keys())
                     max_pips = max(len(state.net_latents[nid]) for nid in net_ids) if net_ids else 100
-                    
+
                     latents = torch.zeros(len(net_ids), max_pips, device=self.device)
                     noise = torch.zeros(len(net_ids), max_pips, device=self.device)
-                    
+                    mask = torch.zeros(len(net_ids), max_pips, device=self.device)
+
                     for j, net_id in enumerate(net_ids):
                         latent = state.net_latents[net_id].to(self.device)
                         n = len(latent)
                         latents[j, :n] = latent
+                        mask[j, :n] = 1.0
                         noise[j, :n] = torch.randn_like(latent)
-                    
+
                     net_latents_batch.append(latents)
                     noise_batch.append(noise)
-                
+                    pip_mask_batch.append(mask)
+
                 # Pad and forward
                 max_nets = max(lat.shape[0] for lat in net_latents_batch)
                 max_pips = max(lat.shape[1] for lat in net_latents_batch)
-                
+
                 net_latents_padded = torch.zeros(B, max_nets, max_pips, device=self.device)
                 noise_padded = torch.zeros(B, max_nets, max_pips, device=self.device)
-                
-                for i, (lat, n) in enumerate(zip(net_latents_batch, noise_batch)):
+                pip_mask_padded = torch.zeros(B, max_nets, max_pips, device=self.device)
+
+                for i, (lat, n, m) in enumerate(zip(net_latents_batch, noise_batch, pip_mask_batch)):
                     n_nets, n_pips = lat.shape
                     net_latents_padded[i, :n_nets, :n_pips] = lat
                     noise_padded[i, :n_nets, :n_pips] = n
-                
+                    pip_mask_padded[i, :n_nets, :n_pips] = m
+
                 alpha_bar_t = self.model.schedule.get_alpha_bar(t).view(B, 1, 1)
                 x_t = torch.sqrt(alpha_bar_t) * net_latents_padded + torch.sqrt(1 - alpha_bar_t) * noise_padded
-                
+
                 predicted_noise = self.model(x_t, t, net_features, net_positions)
-                
-                valid_mask = (net_latents_padded.abs().sum(dim=-1) > 0).unsqueeze(-1)
-                loss = ((predicted_noise - noise_padded) ** 2 * valid_mask).sum() / valid_mask.sum()
+
+                # Use pip-level mask for correct loss computation
+                num_valid_pips = pip_mask_padded.sum().clamp(min=1)
+                loss = ((predicted_noise - noise_padded) ** 2 * pip_mask_padded).sum() / num_valid_pips
                 
                 total_loss += loss.item()
                 num_batches += 1
