@@ -57,13 +57,14 @@ class NetEncoder(nn.Module):
     - Spatial span (bounding box)
     """
 
-    def __init__(self, hidden_dim: int = 128):
+    def __init__(self, hidden_dim: int = 128, net_feat_dim: int = 7):
         super().__init__()
         self.hidden_dim = hidden_dim
+        self.net_feat_dim = net_feat_dim
 
         # Encode net properties
         self.net_mlp = nn.Sequential(
-            nn.Linear(8, hidden_dim),  # fanout, bbox, criticality, etc.
+            nn.Linear(net_feat_dim, hidden_dim),  # fanout, bbox, criticality, etc.
             nn.ReLU(),
             nn.Linear(hidden_dim, hidden_dim)
         )
@@ -109,10 +110,12 @@ class CongestionEncoder(nn.Module):
 
         self.fc = nn.Linear(64 * 8 * 8, hidden_dim)
 
-    def forward(self, congestion: torch.Tensor) -> torch.Tensor:
+    def forward(self, congestion: torch.Tensor, batch_size: int = 1) -> torch.Tensor:
         """Encode congestion map."""
         if congestion is None:
-            return torch.zeros(1, self.hidden_dim)
+            # Get device from model parameters
+            device = next(self.parameters()).device
+            return torch.zeros(batch_size, self.hidden_dim, device=device)
 
         if congestion.dim() == 2:
             congestion = congestion.unsqueeze(0).unsqueeze(0)
@@ -233,6 +236,7 @@ class RoutingDiffusion(nn.Module):
         schedule: Optional[NoiseSchedule] = None,
         hidden_dim: int = 256,
         max_pips_per_net: int = 1000,
+        net_feat_dim: int = 7,
         **kwargs
     ):
         super().__init__()
@@ -243,7 +247,7 @@ class RoutingDiffusion(nn.Module):
         self.hidden_dim = hidden_dim
 
         # All encoders use the same hidden_dim for consistency
-        self.net_encoder = NetEncoder(hidden_dim=hidden_dim)
+        self.net_encoder = NetEncoder(hidden_dim=hidden_dim, net_feat_dim=net_feat_dim)
         self.congestion_encoder = CongestionEncoder(hidden_dim=hidden_dim)
         self.denoiser = RoutingDenoiser(
             hidden_dim=hidden_dim,
@@ -267,7 +271,7 @@ class RoutingDiffusion(nn.Module):
         net_embeds = net_embeds.unsqueeze(0).expand(B, -1, -1)
 
         # Encode congestion
-        cong_embed = self.congestion_encoder(congestion)
+        cong_embed = self.congestion_encoder(congestion, batch_size=B)
         if cong_embed.size(0) == 1:
             cong_embed = cong_embed.expand(B, -1)
 
@@ -284,16 +288,19 @@ class RoutingDiffusion(nn.Module):
         Corresponds to committing routing decisions for one or more nets.
         Reduces routing entropy.
         """
+        # Get device from input tensors
+        device = net_features.device
+
         # Stack net latents into tensor
         net_ids = list(state.net_latents.keys())
         num_nets = len(net_ids)
 
-        latents = torch.zeros(1, num_nets, self.max_pips)
+        latents = torch.zeros(1, num_nets, self.max_pips, device=device)
         for i, nid in enumerate(net_ids):
-            lat = state.net_latents[nid]
+            lat = state.net_latents[nid].to(device)
             latents[0, i, :len(lat)] = lat
 
-        t = torch.tensor([state.timestep])
+        t = torch.tensor([state.timestep], device=device)
 
         # Predict noise
         with torch.no_grad():
@@ -500,6 +507,7 @@ def create_routing_diffusion(config: Dict[str, Any]) -> RoutingDiffusion:
         schedule=schedule,
         hidden_dim=config.get("hidden_dim", 256),
         max_pips_per_net=config.get("max_pips_per_net", 1000),
+        net_feat_dim=config.get("net_feat_dim", 7),  # Default 7 to match generated data
         num_heads=config.get("num_heads", 8),
         num_layers=config.get("num_layers", 6),
         dropout=config.get("dropout", 0.1)

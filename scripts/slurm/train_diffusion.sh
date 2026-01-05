@@ -12,8 +12,31 @@
 #SBATCH --mail-type=END,FAIL
 #SBATCH --mail-user=YOUR_EMAIL@princeton.edu
 
-# Setup environment
-source venv/bin/activate
+# Project root
+PROJECT_ROOT="/scratch/gpfs/MZHASAN/graph_vector_topological_insulator/mcts_routing"
+cd $PROJECT_ROOT
+
+# Set PYTHONPATH so 'src' module can be found
+export PYTHONPATH="$PROJECT_ROOT:$PYTHONPATH"
+
+# Setup environment - try multiple options
+if [ -f "$PROJECT_ROOT/venv/bin/activate" ]; then
+    source "$PROJECT_ROOT/venv/bin/activate"
+    echo "Activated venv"
+elif [ -f "$HOME/.local/bin/activate" ]; then
+    source "$HOME/.local/bin/activate"
+    echo "Activated home venv"
+elif command -v conda &> /dev/null && conda info --envs | grep -q mcts_routing; then
+    conda activate mcts_routing
+    echo "Activated conda environment"
+else
+    echo "Warning: No virtual environment found, using system Python"
+    # Ensure project is installed
+    if ! python -c "import src" 2>/dev/null; then
+        echo "Installing project in development mode..."
+        pip install -e . --user
+    fi
+fi
 
 # Set up distributed training environment variables
 export MASTER_ADDR=$(scontrol show hostnames $SLURM_JOB_NODELIST | head -n 1)
@@ -21,14 +44,30 @@ export MASTER_PORT=29500
 export WORLD_SIZE=$SLURM_NTASKS
 export RANK=$SLURM_PROCID
 
-# Use $SCRATCH for data and checkpoints if available
-DATA_DIR=${SCRATCH:-.}/data
-CHECKPOINT_DIR=${SCRATCH:-.}/checkpoints
+# Data directories
+DATA_DIR="$PROJECT_ROOT/data/routing_states"
+CHECKPOINT_DIR="$PROJECT_ROOT/checkpoints"
 
-# Create directories if they don't exist
-mkdir -p $DATA_DIR
+# Verify data exists
+if [ ! -d "$DATA_DIR" ]; then
+    echo "ERROR: Data directory not found at $DATA_DIR"
+    exit 1
+fi
+
+PKL_COUNT=$(ls -1 "$DATA_DIR"/*.pkl 2>/dev/null | wc -l)
+if [ "$PKL_COUNT" -eq 0 ]; then
+    echo "ERROR: No .pkl files found in $DATA_DIR"
+    exit 1
+fi
+echo "Found $PKL_COUNT routing samples in $DATA_DIR"
+
+# Create directories
 mkdir -p $CHECKPOINT_DIR
 mkdir -p logs
+
+echo "Data directory: $DATA_DIR"
+echo "Checkpoint directory: $CHECKPOINT_DIR"
+echo "PYTHONPATH: $PYTHONPATH"
 
 # Run training with srun for proper multi-GPU setup
 srun python experiments/train_routing.py \
@@ -39,4 +78,3 @@ srun python experiments/train_routing.py \
     --seed 42
 
 echo "Training job completed"
-
