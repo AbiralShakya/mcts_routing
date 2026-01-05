@@ -132,13 +132,17 @@ class RoutingDenoiser(nn.Module):
     Predicts noise in net routing latents conditioned on:
     - Current noisy routing assignments
     - Timestep
-    - Net embeddings
-    - Congestion state
+    - Net embeddings (pre-computed from shared encoder)
+    - Congestion state (pre-computed from shared encoder)
 
     A denoising step corresponds to:
     - Fixing routing for one net, OR
     - Fixing a segment/Steiner subtree, OR
     - Committing a bundle of correlated nets
+    
+    NOTE: This module does NOT contain its own encoders.
+    All embeddings (net_embeds, congestion_embed) are passed in pre-computed
+    from shared encoders in RoutingDiffusion to enable joint training.
     """
 
     def __init__(
@@ -167,8 +171,8 @@ class RoutingDenoiser(nn.Module):
             nn.Linear(hidden_dim, hidden_dim)
         )
 
-        # Congestion encoder
-        self.congestion_encoder = CongestionEncoder(hidden_dim)
+        # NOTE: Removed duplicate CongestionEncoder - now using shared encoder
+        # Congestion embedding is passed in pre-computed from RoutingDiffusion
 
         # Cross-attention between nets
         encoder_layer = nn.TransformerEncoderLayer(
@@ -222,7 +226,11 @@ class RoutingDenoiser(nn.Module):
 
 
 class RoutingDiffusion(nn.Module):
-    """Complete routing diffusion model.
+    """Complete routing diffusion model with shared encoder support.
+
+    This model encodes net and congestion information using either:
+    1. Shared encoders (for joint training with critic) - RECOMMENDED
+    2. Independent encoders (backward compatibility)
 
     Diffusion provides:
     - A distribution over plausible routing paths
@@ -230,6 +238,35 @@ class RoutingDiffusion(nn.Module):
 
     Diffusion does NOT guarantee legality or optimality.
     That's what the search and real router are for.
+    
+    Architecture:
+        RoutingDiffusion (this class)
+        ├─ NetEncoder (shared or independent)
+        ├─ CongestionEncoder (shared or independent)  
+        └─ RoutingDenoiser (receives pre-computed embeddings)
+    
+    Usage with shared encoders (recommended for best performance):
+        ```python
+        from src.shared.encoders import create_shared_encoders
+        
+        # Create shared encoders once
+        net_encoder, cong_encoder = create_shared_encoders(hidden_dim=256)
+        
+        # Use in both diffusion and critic
+        diffusion = RoutingDiffusion(
+            hidden_dim=256,
+            shared_net_encoder=net_encoder,
+            shared_congestion_encoder=cong_encoder
+        )
+        
+        critic = RoutingCritic(
+            hidden_dim=256,
+            shared_net_encoder=net_encoder,
+            shared_congestion_encoder=cong_encoder
+        )
+        
+        # Now both models share representations!
+        ```
     """
 
     def __init__(
@@ -238,8 +275,8 @@ class RoutingDiffusion(nn.Module):
         hidden_dim: int = 256,
         max_pips_per_net: int = 1000,
         net_feat_dim: int = 7,
-        shared_net_encoder: Optional[SharedNetEncoder] = None,
-        shared_congestion_encoder: Optional[SharedCongestionEncoder] = None,
+        shared_net_encoder: Optional['SharedNetEncoder'] = None,
+        shared_congestion_encoder: Optional['SharedCongestionEncoder'] = None,
         **kwargs
     ):
         super().__init__()
@@ -249,18 +286,23 @@ class RoutingDiffusion(nn.Module):
         self.max_pips = max_pips_per_net
         self.hidden_dim = hidden_dim
 
-        # Use shared encoders if provided, otherwise create new ones
-        # This allows backward compatibility and shared training
+        # Use shared encoders if provided (for joint training)
+        # Otherwise create independent encoders (backward compatibility)
         if shared_net_encoder is not None:
             self.net_encoder = shared_net_encoder
+            self.using_shared_net_encoder = True
         else:
             self.net_encoder = NetEncoder(hidden_dim=hidden_dim, net_feat_dim=net_feat_dim)
+            self.using_shared_net_encoder = False
         
         if shared_congestion_encoder is not None:
             self.congestion_encoder = shared_congestion_encoder
+            self.using_shared_congestion_encoder = True
         else:
             self.congestion_encoder = CongestionEncoder(hidden_dim=hidden_dim)
+            self.using_shared_congestion_encoder = False
         
+        # Denoiser receives pre-computed embeddings (no internal encoders)
         self.denoiser = RoutingDenoiser(
             hidden_dim=hidden_dim,
             max_pips_per_net=max_pips_per_net,
