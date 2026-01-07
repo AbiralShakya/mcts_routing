@@ -97,6 +97,7 @@ class RoutingDiffusionTrainer:
         
         # Training params
         self.T = model.num_timesteps
+        self.max_pips = getattr(model, 'max_pips', 1000)  # Model's configured max pips per net
         self.batch_size = config.get('training', {}).get('batch_size', 32)
         
         # Checkpointing
@@ -167,8 +168,9 @@ class RoutingDiffusionTrainer:
                 pip_mask_batch.append(mask)
 
             # Pad to same size for batching
+            # Use model's configured max_pips to ensure consistent shape with pip_encoder
             max_nets = max(lat.shape[0] for lat in net_latents_batch)
-            max_pips = max(lat.shape[1] for lat in net_latents_batch)
+            max_pips = self.max_pips  # Use configured max, not batch max
 
             net_latents_padded = torch.zeros(B, max_nets, max_pips, device=self.device)
             noise_padded = torch.zeros(B, max_nets, max_pips, device=self.device)
@@ -276,8 +278,9 @@ class RoutingDiffusionTrainer:
                     pip_mask_batch.append(mask)
 
                 # Pad and forward
+                # Use model's configured max_pips to ensure consistent shape with pip_encoder
                 max_nets = max(lat.shape[0] for lat in net_latents_batch)
-                max_pips = max(lat.shape[1] for lat in net_latents_batch)
+                max_pips = self.max_pips  # Use configured max, not batch max
 
                 net_latents_padded = torch.zeros(B, max_nets, max_pips, device=self.device)
                 noise_padded = torch.zeros(B, max_nets, max_pips, device=self.device)

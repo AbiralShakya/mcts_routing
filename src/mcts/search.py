@@ -33,6 +33,7 @@ from ..critic.features import RoutingGraphBuilder
 from ..bridge.router import NextPNRRouter
 from ..core.routing.netlist import Netlist
 from ..core.routing.grid import Grid
+from typing import Optional
 
 
 @dataclass
@@ -56,7 +57,7 @@ class RouterConfig:
 def iterate(
     root: RoutingNode,
     diffusion: RoutingDiffusion,
-    critic: RoutingCritic,
+    critic: Optional[RoutingCritic],
     router: NextPNRRouter,
     grid: Grid,
     netlist: Netlist,
@@ -93,31 +94,32 @@ def iterate(
         child = RoutingNode(state=new_state, parent=node)
         node.children.append(child)
 
-        # Critic evaluation
-        graph = graph_builder.build_graph(new_state, netlist)
+        # Critic evaluation (if critic is available)
+        if critic is not None:
+            graph = graph_builder.build_graph(new_state, netlist)
 
-        graph = RoutingGraph(
-            node_features=graph.node_features.to(config.device),
-            edge_index=graph.edge_index.to(config.device),
-            edge_features=graph.edge_features.to(config.device),
-            congestion=graph.congestion.to(config.device),
-            unrouted_mask=graph.unrouted_mask.to(config.device)
-        )
+            graph = RoutingGraph(
+                node_features=graph.node_features.to(config.device),
+                edge_index=graph.edge_index.to(config.device),
+                edge_features=graph.edge_features.to(config.device),
+                congestion=graph.congestion.to(config.device),
+                unrouted_mask=graph.unrouted_mask.to(config.device)
+            )
 
-        with torch.no_grad():
-            # Pass net features and congestion for shared encoders
-            critic_score = critic(
-                graph,
-                net_features=net_features,
-                net_positions=net_positions,
-                congestion_map=new_state.congestion_map
-            ).item()
+            with torch.no_grad():
+                # Pass net features and congestion for shared encoders
+                critic_score = critic(
+                    graph,
+                    net_features=net_features,
+                    net_positions=net_positions,
+                    congestion_map=new_state.congestion_map
+                ).item()
 
-        if critic_score < config.critic_threshold:
-            # PRUNE: Critic predicts routing failure
-            child.pruned = True
-            backpropagate(child, 0.0)
-            return 0.0
+            if critic_score < config.critic_threshold:
+                # PRUNE: Critic predicts routing failure
+                child.pruned = True
+                backpropagate(child, 0.0)
+                return 0.0
 
         node = child
 
@@ -143,7 +145,7 @@ class MCTSRouter:
     def __init__(
         self,
         diffusion: RoutingDiffusion,
-        critic: RoutingCritic,
+        critic: Optional[RoutingCritic],
         router: NextPNRRouter,
         grid: Grid,
         netlist: Netlist,
@@ -152,7 +154,7 @@ class MCTSRouter:
     ):
         self.config = config or RouterConfig()
         self.diffusion = diffusion.to(device)
-        self.critic = critic.to(device)
+        self.critic = critic.to(device) if critic is not None else None
         self.router = router
         self.grid = grid
         self.netlist = netlist
@@ -169,29 +171,36 @@ class MCTSRouter:
         """Compute net feature tensors."""
         num_nets = len(self.netlist.nets)
 
-        features = torch.zeros(num_nets, 8, device=self.device)
+        features = torch.zeros(num_nets, 7, device=self.device)  # Changed from 8 to 7
         positions = torch.zeros(num_nets, 4, device=self.device)
 
         width, height = self.grid.get_size()
 
         for i, net in enumerate(self.netlist.nets):
-            # Fanout
-            features[i, 0] = len(net.pins) / 100.0
-
-            # Bounding box
             if net.pins:
                 xs = [p.x for p in net.pins]
                 ys = [p.y for p in net.pins]
                 min_x, max_x = min(xs), max(xs)
                 min_y, max_y = min(ys), max(ys)
+                
+                bbox_width = max_x - min_x
+                bbox_height = max_y - min_y
+                hpwl = bbox_width + bbox_height
+                
+                # Compute 7 features matching training data format
+                features[i, 0] = (len(net.pins) - 1) / 10.0  # normalized fanout
+                features[i, 1] = bbox_width / max(width, 1)  # normalized bbox width
+                features[i, 2] = bbox_height / max(height, 1)  # normalized bbox height
+                features[i, 3] = hpwl / (width + height)  # normalized HPWL
+                features[i, 4] = (min_x + max_x) / 2.0 / max(width, 1)  # center x
+                features[i, 5] = (min_y + max_y) / 2.0 / max(height, 1)  # center y
+                features[i, 6] = len(net.pins) / 10.0  # normalized pin count
 
-                positions[i, 0] = min_x / width
-                positions[i, 1] = min_y / height
-                positions[i, 2] = max_x / width
-                positions[i, 3] = max_y / height
-
-                # HPWL
-                features[i, 1] = ((max_x - min_x) + (max_y - min_y)) / (width + height)
+                # Positions (bounding box)
+                positions[i, 0] = min_x / max(width, 1)
+                positions[i, 1] = min_y / max(height, 1)
+                positions[i, 2] = max_x / max(width, 1)
+                positions[i, 3] = max_y / max(height, 1)
 
         return features, positions
 
