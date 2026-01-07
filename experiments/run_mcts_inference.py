@@ -66,7 +66,8 @@ def load_models(
             edge_dim=crit_config.get('edge_dim', 32),
             hidden_dim=crit_config.get('hidden_dim', 128),
             num_layers=crit_config.get('num_layers', 4),
-            dropout=crit_config.get('dropout', 0.1)
+            dropout=crit_config.get('dropout', 0.1),
+            num_timesteps=crit_config.get('num_timesteps', 1000)  # For time-aware evaluation
         )
         
         if 'model_state_dict' in crit_checkpoint:

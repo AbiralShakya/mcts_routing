@@ -113,7 +113,8 @@ def main():
         dropout=model_config.get('dropout', 0.1),
         shared_net_encoder=shared_net_encoder,
         shared_congestion_encoder=shared_congestion_encoder,
-        net_feat_dim=model_config.get('net_feat_dim', 7)
+        net_feat_dim=model_config.get('net_feat_dim', 7),
+        num_timesteps=model_config.get('num_timesteps', 1000)  # For time-aware evaluation
     )
     
     # Create trainer
