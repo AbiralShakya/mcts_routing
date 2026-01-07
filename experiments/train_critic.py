@@ -10,7 +10,7 @@ import logging
 import os
 
 from src.critic.training import CriticTrainer, RoutingDataset, collate_routing_graphs
-from src.critic.gnn import RoutingCritic
+from src.critic.gnn import RoutingCritic, RoutingGraph
 from src.critic.features import RoutingGraphBuilder
 from src.shared.encoders import create_shared_encoders
 from src.utils.seed import set_seed
@@ -160,10 +160,12 @@ def main():
     test_examples = examples[n_train+n_val:]
     
     # Create graph builder
-    # This is simplified - would need actual grid
+    # Use smaller grid for faster training - can increase for production
     from src.core.routing.grid import Grid
-    grid = Grid(width=100, height=100)  # Placeholder
+    grid_size = config.get('data', {}).get('grid_size', 20)  # Default 20x20
+    grid = Grid(width=grid_size, height=grid_size)
     graph_builder = RoutingGraphBuilder(grid)
+    logger.info(f"Using grid size: {grid_size}x{grid_size}")
     
     # Create datasets
     train_dataset = RoutingDataset(train_examples, graph_builder)
@@ -203,23 +205,30 @@ def main():
         val_count = 0
         with torch.no_grad():
             for batch in val_loader:
-                graph, scores = batch
-                graph = graph.to(trainer.device)
+                graph, timesteps, scores = batch  # 3 items: graph, timesteps, scores
+                graph = RoutingGraph(
+                    node_features=graph.node_features.to(trainer.device),
+                    edge_index=graph.edge_index.to(trainer.device),
+                    edge_features=graph.edge_features.to(trainer.device),
+                    congestion=graph.congestion.to(trainer.device),
+                    unrouted_mask=graph.unrouted_mask.to(trainer.device),
+                    batch=graph.batch.to(trainer.device) if graph.batch is not None else None
+                )
+                timesteps = timesteps.to(trainer.device)
                 scores = scores.to(trainer.device)
-                
-                # For shared encoders, we need net_features, net_positions, congestion_map
-                # These should be extracted from the examples if available
-                # For now, pass None (will use graph-only features)
+
+                # Pass timestep for time-aware evaluation
                 pred = trainer.critic(
                     graph,
-                    net_features=None,  # TODO: Extract from examples if using shared encoders
+                    timestep=timesteps,
+                    net_features=None,
                     net_positions=None,
                     congestion_map=None
                 )
                 loss = trainer.criterion(pred, scores)
                 val_loss += loss.item()
                 val_count += 1
-        
+
         val_metrics = {'loss': val_loss / max(val_count, 1)}
         
         logger.info(

@@ -88,21 +88,45 @@ class RoutingGraphBuilder:
         state: RoutingState,
         resources: Optional[List[RoutingResource]]
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Build node feature matrix and congestion vector."""
-        if resources is None:
-            # Create default grid of resources
-            num_nodes = self.width * self.height
-            resources = [
-                RoutingResource(
-                    resource_id=i,
-                    x=i % self.width,
-                    y=i // self.width,
-                    layer=0,
-                    resource_type="node"
-                )
-                for i in range(num_nodes)
-            ]
+        """Build node feature matrix and congestion vector.
 
+        OPTIMIZED: Uses vectorized operations for default grid case.
+        """
+        if resources is None:
+            # VECTORIZED default grid - much faster than creating Resource objects!
+            num_nodes = self.width * self.height
+            features = torch.zeros(num_nodes, self.node_dim)
+            congestion = torch.zeros(num_nodes)
+
+            # Create coordinate tensors
+            indices = torch.arange(num_nodes)
+            x_coords = (indices % self.width).float()
+            y_coords = (indices // self.width).float()
+
+            # Position features (normalized)
+            features[:, 0] = x_coords / max(self.width, 1)
+            features[:, 1] = y_coords / max(self.height, 1)
+            features[:, 2] = 0.0  # layer 0
+
+            # Type encoding - all nodes
+            features[:, 5] = 1.0
+
+            # Capacity - all 1.0
+            features[:, 6] = 0.1  # 1/10
+
+            # Congestion from state
+            if state.congestion_map is not None:
+                cmap = state.congestion_map
+                if cmap.dim() == 2:
+                    # Flatten congestion map to match node order
+                    flat_cong = cmap.flatten()
+                    if flat_cong.size(0) == num_nodes:
+                        congestion = flat_cong.clone()
+                        features[:, 7] = congestion
+
+            return features, congestion
+
+        # Non-vectorized path for explicit resources
         num_nodes = len(resources)
         features = torch.zeros(num_nodes, self.node_dim)
         congestion = torch.zeros(num_nodes)
@@ -154,42 +178,50 @@ class RoutingGraphBuilder:
         """Build edge index and features.
 
         Creates edges between adjacent routing resources.
+        OPTIMIZED: Uses vectorized operations instead of loops.
         """
         if resources is None:
-            num_nodes = self.width * self.height
-            # Grid connectivity
+            # VECTORIZED grid connectivity - much faster than loops!
+            # Create node indices
+            indices = torch.arange(self.width * self.height).view(self.height, self.width)
+
             edges_src = []
             edges_dst = []
 
-            for y in range(self.height):
-                for x in range(self.width):
-                    idx = y * self.width + x
+            # Horizontal edges (right neighbors) - vectorized
+            if self.width > 1:
+                src_h = indices[:, :-1].flatten()
+                dst_h = indices[:, 1:].flatten()
+                edges_src.append(src_h)
+                edges_src.append(dst_h)  # Reverse
+                edges_dst.append(dst_h)
+                edges_dst.append(src_h)  # Reverse
 
-                    # Right neighbor
-                    if x < self.width - 1:
-                        edges_src.extend([idx, idx + 1])
-                        edges_dst.extend([idx + 1, idx])
-
-                    # Down neighbor
-                    if y < self.height - 1:
-                        edges_src.extend([idx, idx + self.width])
-                        edges_dst.extend([idx + self.width, idx])
+            # Vertical edges (down neighbors) - vectorized
+            if self.height > 1:
+                src_v = indices[:-1, :].flatten()
+                dst_v = indices[1:, :].flatten()
+                edges_src.append(src_v)
+                edges_src.append(dst_v)  # Reverse
+                edges_dst.append(dst_v)
+                edges_dst.append(src_v)  # Reverse
 
             if not edges_src:
                 return torch.zeros(2, 0, dtype=torch.long), torch.zeros(0, self.edge_dim)
 
-            edge_index = torch.tensor([edges_src, edges_dst], dtype=torch.long)
-            edge_features = torch.zeros(len(edges_src), self.edge_dim)
+            edge_src = torch.cat(edges_src)
+            edge_dst = torch.cat(edges_dst)
+            edge_index = torch.stack([edge_src, edge_dst])
 
-            # Simple edge features (direction, distance)
-            for i in range(len(edges_src)):
-                src_x = edges_src[i] % self.width
-                src_y = edges_src[i] // self.width
-                dst_x = edges_dst[i] % self.width
-                dst_y = edges_dst[i] // self.width
+            # VECTORIZED edge features - no loops!
+            src_x = (edge_src % self.width).float()
+            src_y = (edge_src // self.width).float()
+            dst_x = (edge_dst % self.width).float()
+            dst_y = (edge_dst // self.width).float()
 
-                edge_features[i, 0] = (dst_x - src_x) / self.width  # dx
-                edge_features[i, 1] = (dst_y - src_y) / self.height  # dy
+            edge_features = torch.zeros(edge_index.size(1), self.edge_dim)
+            edge_features[:, 0] = (dst_x - src_x) / max(self.width, 1)  # dx
+            edge_features[:, 1] = (dst_y - src_y) / max(self.height, 1)  # dy
 
             return edge_index, edge_features
 
