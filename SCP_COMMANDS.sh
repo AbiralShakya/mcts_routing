@@ -39,3 +39,5 @@ echo "Next steps on della:"
 echo "  1. Submit joint training: sbatch scripts/slurm/train_joint.sh"
 echo "  2. Or run MCTS inference: sbatch scripts/slurm/run_mcts.sh"
 
+
+

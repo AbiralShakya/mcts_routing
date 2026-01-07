@@ -175,7 +175,7 @@ def main():
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=4,
+        num_workers=0,
         collate_fn=collate_routing_graphs,
         pin_memory=True
     )
@@ -183,7 +183,7 @@ def main():
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=4,
+        num_workers=0,
         collate_fn=collate_routing_graphs,
         pin_memory=True
     )

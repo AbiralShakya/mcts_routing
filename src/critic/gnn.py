@@ -238,8 +238,16 @@ class RoutingCritic(nn.Module):
         else:
             graph_embed = x.mean(dim=0, keepdim=True)
 
-        # Encode unrouted fraction
-        unrouted_frac = graph.unrouted_mask.float().mean().unsqueeze(0).unsqueeze(0)
+        # Encode unrouted fraction (batch-aware)
+        # When graphs are batched, unrouted_mask is concatenated. We need per-graph fractions.
+        if graph.batch is not None:
+            num_graphs = graph.batch.max().item() + 1
+            # unrouted_mask doesn't have batch indices - it's a global mask
+            # For now, assume unrouted_mask is per-graph and broadcast
+            unrouted_frac = graph.unrouted_mask.float().mean()
+            unrouted_frac = unrouted_frac.view(1, 1).expand(num_graphs, 1)
+        else:
+            unrouted_frac = graph.unrouted_mask.float().mean().unsqueeze(0).unsqueeze(0)
         unrouted_embed = self.unrouted_encoder(unrouted_frac)
 
         # Compute time embedding
