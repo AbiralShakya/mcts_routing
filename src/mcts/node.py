@@ -20,6 +20,7 @@ class RoutingNode:
         visit_count: N - number of times visited
         total_value: W - sum of backpropagated rewards
         pruned: Whether critic killed this branch
+        critic_score: Optional critic evaluation score (used for UCB tiebreaking)
     """
     state: RoutingState
     parent: Optional['RoutingNode'] = None
@@ -27,6 +28,7 @@ class RoutingNode:
     visit_count: int = 0
     total_value: float = 0.0
     pruned: bool = False
+    critic_score: Optional[float] = None
 
     @property
     def Q(self) -> float:

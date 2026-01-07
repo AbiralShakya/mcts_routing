@@ -1,0 +1,28 @@
+# DDIM schedule configuration
+#
+# DDIM (Denoising Diffusion Implicit Models) provides:
+# - Deterministic sampling (no noise added during inference)
+# - Faster inference with fewer steps (e.g., 50-100 vs 1000)
+# - Good for baselines and fast evaluation
+#
+# NOTE: For MCTS, use DDPM instead! MCTS requires stochastic sampling
+# to create different branches via different noise samples.
+
+schedule:
+  type: "ddim"
+  num_timesteps: 1000
+  beta_start: 0.0001
+  beta_end: 0.02
+  beta_schedule: "linear"
+
+sampling:
+  # DDIM allows much fewer inference steps
+  num_inference_steps: 50
+  # Set eta=0 for fully deterministic DDIM
+  # Set eta=1 for fully stochastic (equivalent to DDPM)
+  eta: 0.0
+
+# For MCTS comparison baselines
+inference:
+  batch_size: 16
+  use_ema: true

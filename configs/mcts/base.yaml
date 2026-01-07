@@ -4,7 +4,16 @@ mcts:
   max_depth: 50
   num_simulations: 1000
   temperature: 1.0
-  
+
+  # K-branch expansion (TRUE MCTS)
+  # Old behavior (rejection sampling) used num_branches=1
+  # True MCTS exploration uses num_branches >= 4
+  num_branches: 4
+  branch_noise_scale: 0.1
+
+  # Critic settings for time-aware pruning
+  critic_threshold: 0.3
+
 progressive_widening:
   k: 2.0  # Base constant
   alpha: 0.5  # Exponent

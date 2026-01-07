@@ -52,6 +52,12 @@ class RouterConfig:
     chipdb_path: Optional[str] = None
     router_timeout: float = 60.0
     device: str = "cuda"
+    # MCTS branching: number of children to expand per node
+    # Setting to 1 is rejection sampling (old behavior)
+    # Setting to 4+ enables true MCTS tree exploration
+    num_branches: int = 4
+    # Noise scale for stochastic branching
+    branch_noise_scale: float = 0.1
 
 
 def iterate(
@@ -65,74 +71,155 @@ def iterate(
     net_positions: torch.Tensor,
     config: RouterConfig
 ) -> float:
-    """Single MCTS iteration.
+    """Single MCTS iteration with K-branch expansion.
 
-    This is the core algorithm:
+    This implements TRUE MCTS with multiple branches per node:
     1. UCB select from root
-    2. Denoise until terminal or pruned
-    3. Score with real router if terminal
-    4. Backpropagate
+    2. Expand K children with different noise samples
+    3. Evaluate all children with time-aware critic
+    4. Prune children below threshold
+    5. UCB select from non-pruned children
+    6. Continue denoising until terminal or all pruned
+    7. Score with real router if terminal
+    8. Backpropagate
+
+    The key difference from rejection sampling (1 child):
+    - Multiple branches explore alternative denoising paths
+    - Critic pruning removes bad branches early
+    - UCB selection balances exploration vs exploitation
 
     Returns:
-        Reward achieved (0 if pruned)
+        Reward achieved (0 if all branches pruned)
     """
     graph_builder = RoutingGraphBuilder(grid)
 
-    # 1. UCB Selection
+    # 1. UCB Selection from root
     node = ucb_select(root, config.ucb_c)
 
-    # 2. Denoise with critic pruning
-    while node.t > 0:
-        # Denoise step - commit routing decisions
-        new_state = diffusion.denoise_step(
-            node.state,
-            net_features,
-            net_positions
-        )
+    # 2. Denoise with K-branch expansion and critic pruning
+    while node.state.timestep > 0:
+        # Get latent shape for generating noise
+        num_nets = len(node.state.net_latents)
+        latent_shape = diffusion.get_latent_shape(num_nets)
 
-        # Create child
-        child = RoutingNode(state=new_state, parent=node)
-        node.children.append(child)
+        # Expand K children with different noise samples
+        for k in range(config.num_branches):
+            # Sample stochastic noise for this branch
+            noise_k = torch.randn(latent_shape, device=config.device)
 
-        # Critic evaluation (if critic is available)
-        if critic is not None:
-            graph = graph_builder.build_graph(new_state, netlist)
-
-            graph = RoutingGraph(
-                node_features=graph.node_features.to(config.device),
-                edge_index=graph.edge_index.to(config.device),
-                edge_features=graph.edge_features.to(config.device),
-                congestion=graph.congestion.to(config.device),
-                unrouted_mask=graph.unrouted_mask.to(config.device)
+            # Denoise with this specific noise
+            new_state = diffusion.denoise_step_stochastic(
+                node.state,
+                net_features,
+                net_positions,
+                noise=noise_k,
+                noise_scale=config.branch_noise_scale
             )
 
-            with torch.no_grad():
-                # Pass net features and congestion for shared encoders
-                critic_score = critic(
-                    graph,
-                    net_features=net_features,
-                    net_positions=net_positions,
-                    congestion_map=new_state.congestion_map
-                ).item()
+            # Create child node
+            child = RoutingNode(state=new_state, parent=node)
+            node.children.append(child)
 
-            if critic_score < config.critic_threshold:
-                # PRUNE: Critic predicts routing failure
-                child.pruned = True
-                backpropagate(child, 0.0)
-                return 0.0
+            # Critic evaluation with time-aware scoring
+            if critic is not None:
+                graph = graph_builder.build_graph(new_state, netlist)
 
-        node = child
+                graph = RoutingGraph(
+                    node_features=graph.node_features.to(config.device),
+                    edge_index=graph.edge_index.to(config.device),
+                    edge_features=graph.edge_features.to(config.device),
+                    congestion=graph.congestion.to(config.device),
+                    unrouted_mask=graph.unrouted_mask.to(config.device)
+                )
 
-    # 3. Terminal: Evaluate with REAL router
+                with torch.no_grad():
+                    # Pass timestep for time-aware evaluation
+                    # Critical: at high t, noisy states are expected and should not be penalized
+                    timestep_tensor = torch.tensor([new_state.timestep], device=config.device)
+
+                    critic_score = critic(
+                        graph,
+                        timestep=timestep_tensor,
+                        net_features=net_features,
+                        net_positions=net_positions,
+                        congestion_map=new_state.congestion_map
+                    ).item()
+
+                # Store critic score on child for UCB selection
+                child.critic_score = critic_score
+
+                if critic_score < config.critic_threshold:
+                    # Mark as pruned but don't backpropagate yet
+                    child.pruned = True
+
+        # 3. UCB select from non-pruned children
+        non_pruned = [c for c in node.children if not c.pruned]
+
+        if not non_pruned:
+            # All children pruned - backpropagate failure
+            # Pick any child to backpropagate through
+            if node.children:
+                backpropagate(node.children[0], 0.0)
+            return 0.0
+
+        # Select best child using UCB (considering critic scores as prior)
+        node = _ucb_select_from_list(non_pruned, config.ucb_c)
+
+    # 4. Terminal: Evaluate with REAL router
     # This is the ground truth - no learned surrogate
     routing = diffusion.decode_routing(node.state, {})
     result = router.route_from_assignment(routing, netlist, grid)
     reward = result.as_reward()
 
-    # 4. Backpropagate
+    # 5. Backpropagate
     backpropagate(node, reward)
 
     return reward
+
+
+def _ucb_select_from_list(children: list, ucb_c: float) -> RoutingNode:
+    """Select best child from list using UCB formula.
+
+    Args:
+        children: List of non-pruned child nodes
+        ucb_c: UCB exploration constant
+
+    Returns:
+        Selected child node
+    """
+    import math
+
+    if not children:
+        raise ValueError("No children to select from")
+
+    if len(children) == 1:
+        return children[0]
+
+    # Compute parent visit count
+    parent = children[0].parent
+    parent_visits = parent.visit_count if parent else 1
+
+    best_child = None
+    best_ucb = float('-inf')
+
+    for child in children:
+        if child.visit_count == 0:
+            # Unvisited nodes get priority (infinite UCB)
+            # But use critic score to break ties among unvisited
+            ucb = float('inf')
+            if child.critic_score is not None:
+                ucb = 1e9 + child.critic_score  # High base + critic tiebreaker
+        else:
+            # Standard UCB formula
+            exploitation = child.Q  # Use Q property (average value)
+            exploration = ucb_c * math.sqrt(math.log(parent_visits + 1) / child.visit_count)
+            ucb = exploitation + exploration
+
+        if ucb > best_ucb:
+            best_ucb = ucb
+            best_child = child
+
+    return best_child
 
 
 class MCTSRouter:

@@ -132,17 +132,13 @@ class RoutingDenoiser(nn.Module):
     Predicts noise in net routing latents conditioned on:
     - Current noisy routing assignments
     - Timestep
-    - Net embeddings (pre-computed from shared encoder)
-    - Congestion state (pre-computed from shared encoder)
+    - Net embeddings
+    - Congestion state
 
     A denoising step corresponds to:
     - Fixing routing for one net, OR
     - Fixing a segment/Steiner subtree, OR
     - Committing a bundle of correlated nets
-    
-    NOTE: This module does NOT contain its own encoders.
-    All embeddings (net_embeds, congestion_embed) are passed in pre-computed
-    from shared encoders in RoutingDiffusion to enable joint training.
     """
 
     def __init__(
@@ -171,8 +167,8 @@ class RoutingDenoiser(nn.Module):
             nn.Linear(hidden_dim, hidden_dim)
         )
 
-        # NOTE: Removed duplicate CongestionEncoder - now using shared encoder
-        # Congestion embedding is passed in pre-computed from RoutingDiffusion
+        # Congestion encoder
+        self.congestion_encoder = CongestionEncoder(hidden_dim)
 
         # Cross-attention between nets
         encoder_layer = nn.TransformerEncoderLayer(
@@ -226,11 +222,7 @@ class RoutingDenoiser(nn.Module):
 
 
 class RoutingDiffusion(nn.Module):
-    """Complete routing diffusion model with shared encoder support.
-
-    This model encodes net and congestion information using either:
-    1. Shared encoders (for joint training with critic) - RECOMMENDED
-    2. Independent encoders (backward compatibility)
+    """Complete routing diffusion model.
 
     Diffusion provides:
     - A distribution over plausible routing paths
@@ -238,35 +230,6 @@ class RoutingDiffusion(nn.Module):
 
     Diffusion does NOT guarantee legality or optimality.
     That's what the search and real router are for.
-    
-    Architecture:
-        RoutingDiffusion (this class)
-        ├─ NetEncoder (shared or independent)
-        ├─ CongestionEncoder (shared or independent)  
-        └─ RoutingDenoiser (receives pre-computed embeddings)
-    
-    Usage with shared encoders (recommended for best performance):
-        ```python
-        from src.shared.encoders import create_shared_encoders
-        
-        # Create shared encoders once
-        net_encoder, cong_encoder = create_shared_encoders(hidden_dim=256)
-        
-        # Use in both diffusion and critic
-        diffusion = RoutingDiffusion(
-            hidden_dim=256,
-            shared_net_encoder=net_encoder,
-            shared_congestion_encoder=cong_encoder
-        )
-        
-        critic = RoutingCritic(
-            hidden_dim=256,
-            shared_net_encoder=net_encoder,
-            shared_congestion_encoder=cong_encoder
-        )
-        
-        # Now both models share representations!
-        ```
     """
 
     def __init__(
@@ -275,8 +238,8 @@ class RoutingDiffusion(nn.Module):
         hidden_dim: int = 256,
         max_pips_per_net: int = 1000,
         net_feat_dim: int = 7,
-        shared_net_encoder: Optional['SharedNetEncoder'] = None,
-        shared_congestion_encoder: Optional['SharedCongestionEncoder'] = None,
+        shared_net_encoder: Optional[SharedNetEncoder] = None,
+        shared_congestion_encoder: Optional[SharedCongestionEncoder] = None,
         **kwargs
     ):
         super().__init__()
@@ -286,23 +249,18 @@ class RoutingDiffusion(nn.Module):
         self.max_pips = max_pips_per_net
         self.hidden_dim = hidden_dim
 
-        # Use shared encoders if provided (for joint training)
-        # Otherwise create independent encoders (backward compatibility)
+        # Use shared encoders if provided, otherwise create new ones
+        # This allows backward compatibility and shared training
         if shared_net_encoder is not None:
             self.net_encoder = shared_net_encoder
-            self.using_shared_net_encoder = True
         else:
             self.net_encoder = NetEncoder(hidden_dim=hidden_dim, net_feat_dim=net_feat_dim)
-            self.using_shared_net_encoder = False
         
         if shared_congestion_encoder is not None:
             self.congestion_encoder = shared_congestion_encoder
-            self.using_shared_congestion_encoder = True
         else:
             self.congestion_encoder = CongestionEncoder(hidden_dim=hidden_dim)
-            self.using_shared_congestion_encoder = False
         
-        # Denoiser receives pre-computed embeddings (no internal encoders)
         self.denoiser = RoutingDenoiser(
             hidden_dim=hidden_dim,
             max_pips_per_net=max_pips_per_net,
@@ -347,6 +305,36 @@ class RoutingDiffusion(nn.Module):
         Corresponds to committing routing decisions for one or more nets.
         Reduces routing entropy.
         """
+        # Use internal random noise
+        return self.denoise_step_stochastic(
+            state, net_features, net_positions, noise=None
+        )
+
+    def denoise_step_stochastic(
+        self,
+        state: RoutingState,
+        net_features: torch.Tensor,
+        net_positions: torch.Tensor,
+        noise: Optional[torch.Tensor] = None,
+        noise_scale: float = 0.1
+    ) -> RoutingState:
+        """Single denoising step with explicit noise control.
+
+        This method allows MCTS to control stochasticity for branching.
+        By passing different noise tensors, MCTS can create K different
+        children from the same parent state, enabling true tree exploration.
+
+        Args:
+            state: Current routing state
+            net_features: Net features [num_nets, feat_dim]
+            net_positions: Net positions [num_nets, 4]
+            noise: Optional explicit noise tensor [1, num_nets, max_pips].
+                   If None, generates random noise internally.
+            noise_scale: Scale factor for the noise (default 0.1)
+
+        Returns:
+            New RoutingState after denoising step
+        """
         # Get device from input tensors
         device = net_features.device
 
@@ -372,9 +360,16 @@ class RoutingDiffusion(nn.Module):
         new_latents = (latents - (1 - alpha) * predicted_noise) / (alpha ** 0.5)
 
         # Add noise for non-terminal steps
+        # This is where MCTS can inject different noise for branching
         if state.timestep > 1:
-            noise = torch.randn_like(new_latents) * 0.1
-            new_latents = new_latents + noise
+            if noise is None:
+                # Generate random noise if not provided
+                noise = torch.randn_like(new_latents)
+            else:
+                # Use provided noise (ensure correct shape)
+                if noise.shape != new_latents.shape:
+                    noise = noise.view_as(new_latents)
+            new_latents = new_latents + noise * noise_scale
 
         # Update net latents
         new_net_latents = {}
@@ -396,6 +391,19 @@ class RoutingDiffusion(nn.Module):
             routed_nets=new_routed,
             congestion_map=state.congestion_map
         )
+
+    def get_latent_shape(self, num_nets: int) -> Tuple[int, int, int]:
+        """Get the shape of the latent tensor for noise generation.
+
+        Useful for MCTS to generate appropriately-shaped noise tensors.
+
+        Args:
+            num_nets: Number of nets in the routing problem
+
+        Returns:
+            Tuple of (batch_size=1, num_nets, max_pips)
+        """
+        return (1, num_nets, self.max_pips)
 
     def decode_routing(
         self,

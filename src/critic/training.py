@@ -49,17 +49,26 @@ class RoutingDataset(Dataset):
     def __len__(self) -> int:
         return len(self.examples)
 
-    def __getitem__(self, idx: int) -> Tuple[RoutingGraph, float]:
+    def __getitem__(self, idx: int) -> Tuple[RoutingGraph, int, float]:
+        """Return graph, timestep, and target score.
+
+        The timestep is critical for time-aware critic evaluation.
+        """
         ex = self.examples[idx]
         graph = self.graph_builder.build_graph(ex.state, ex.netlist)
-        return graph, ex.final_score
+        timestep = ex.state.timestep
+        return graph, timestep, ex.final_score
 
 
 def collate_routing_graphs(
-    batch: List[Tuple[RoutingGraph, float]]
-) -> Tuple[RoutingGraph, torch.Tensor]:
-    """Collate routing graphs into batch."""
-    graphs, scores = zip(*batch)
+    batch: List[Tuple[RoutingGraph, int, float]]
+) -> Tuple[RoutingGraph, torch.Tensor, torch.Tensor]:
+    """Collate routing graphs into batch.
+
+    Returns:
+        Tuple of (batched_graph, timesteps, scores)
+    """
+    graphs, timesteps, scores = zip(*batch)
 
     # Concatenate node features
     node_features = torch.cat([g.node_features for g in graphs], dim=0)
@@ -92,7 +101,11 @@ def collate_routing_graphs(
         batch=batch_idx
     )
 
-    return batched_graph, torch.tensor(scores, dtype=torch.float32)
+    return (
+        batched_graph,
+        torch.tensor(timesteps, dtype=torch.long),
+        torch.tensor(scores, dtype=torch.float32)
+    )
 
 
 class CriticTrainer:
@@ -140,7 +153,7 @@ class CriticTrainer:
         total_mae = 0.0
         num_batches = 0
 
-        for batch_idx, (graph, targets) in enumerate(dataloader):
+        for batch_idx, (graph, timesteps, targets) in enumerate(dataloader):
             # Move to device
             graph = RoutingGraph(
                 node_features=graph.node_features.to(self.device),
@@ -150,13 +163,15 @@ class CriticTrainer:
                 unrouted_mask=graph.unrouted_mask.to(self.device),
                 batch=graph.batch.to(self.device) if graph.batch is not None else None
             )
+            timesteps = timesteps.to(self.device)
             targets = targets.to(self.device)
 
             # Forward
             self.optimizer.zero_grad()
-            # Pass None for shared encoder inputs (will be enhanced when data includes these)
+            # Pass timestep for time-aware evaluation (critical for proper training)
             predictions = self.critic(
                 graph,
+                timestep=timesteps,
                 net_features=None,
                 net_positions=None,
                 congestion_map=None
@@ -198,7 +213,7 @@ class CriticTrainer:
         targets_all = []
 
         with torch.no_grad():
-            for graph, targets in dataloader:
+            for graph, timesteps, targets in dataloader:
                 graph = RoutingGraph(
                     node_features=graph.node_features.to(self.device),
                     edge_index=graph.edge_index.to(self.device),
@@ -207,10 +222,13 @@ class CriticTrainer:
                     unrouted_mask=graph.unrouted_mask.to(self.device),
                     batch=graph.batch.to(self.device) if graph.batch is not None else None
                 )
+                timesteps = timesteps.to(self.device)
                 targets = targets.to(self.device)
 
+                # Pass timestep for time-aware evaluation
                 predictions = self.critic(
                     graph,
+                    timestep=timesteps,
                     net_features=None,
                     net_positions=None,
                     congestion_map=None

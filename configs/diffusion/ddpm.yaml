@@ -1,4 +1,12 @@
 # DDPM schedule configuration
+#
+# DDPM (Denoising Diffusion Probabilistic Models) provides:
+# - Stochastic sampling (noise added at each step)
+# - Full 1000-step inference
+# - REQUIRED for MCTS branching (different noise = different branches)
+#
+# Use this config for MCTS routing. For fast baselines, use ddim.yaml.
+
 schedule:
   type: "ddpm"
   num_timesteps: 1000
@@ -9,4 +17,12 @@ schedule:
 sampling:
   num_inference_steps: 1000
   use_ddim: false
+
+# MCTS-specific configuration
+mcts:
+  # Number of branches per node (K-branch expansion)
+  # Higher = more exploration, but more compute
+  num_branches: 4
+  # Noise scale for branch differentiation
+  branch_noise_scale: 0.1
 

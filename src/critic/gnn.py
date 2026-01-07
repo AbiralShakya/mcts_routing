@@ -104,6 +104,12 @@ class RoutingCritic(nn.Module):
     1. Encode routing state as graph
     2. Message passing with congestion awareness
     3. Global pooling → value prediction
+
+    Time-Aware Evaluation:
+    The critic accepts an optional timestep parameter to properly evaluate
+    noisy states at different diffusion timesteps. At t=900 (early denoising),
+    a "blurry blob" routing should score high since it hasn't converged yet.
+    Without timestep context, all noisy states look like garbage → aggressive pruning.
     """
 
     def __init__(
@@ -115,16 +121,18 @@ class RoutingCritic(nn.Module):
         dropout: float = 0.1,
         shared_net_encoder: Optional[SharedNetEncoder] = None,
         shared_congestion_encoder: Optional[SharedCongestionEncoder] = None,
-        net_feat_dim: int = 7
+        net_feat_dim: int = 7,
+        num_timesteps: int = 1000
     ):
         super().__init__()
         self.node_dim = node_dim
         self.hidden_dim = hidden_dim
+        self.num_timesteps = num_timesteps
 
         # Shared encoders (optional - for joint training)
         self.shared_net_encoder = shared_net_encoder
         self.shared_congestion_encoder = shared_congestion_encoder
-        
+
         # If shared net encoder provided, use it; otherwise create projection
         if shared_net_encoder is not None:
             # Net encoder outputs hidden_dim, so we need to incorporate it
@@ -132,14 +140,23 @@ class RoutingCritic(nn.Module):
             self.use_shared_net_encoder = True
         else:
             self.use_shared_net_encoder = False
-        
+
         # Input projections for graph structure
         self.node_encoder = nn.Linear(node_dim, hidden_dim)
         self.edge_encoder = nn.Linear(edge_dim, hidden_dim)
-        
+
         # If using shared congestion encoder, we'll use it directly
         # Otherwise, congestion is already in node features
         self.use_shared_congestion = shared_congestion_encoder is not None
+
+        # Time embedding for timestep-aware evaluation
+        # This allows the critic to understand that noisy states at high t
+        # should not be penalized the same way as noisy states at low t
+        self.time_embed = nn.Sequential(
+            nn.Linear(1, hidden_dim),
+            nn.SiLU(),
+            nn.Linear(hidden_dim, hidden_dim)
+        )
 
         # Message passing layers
         self.mp_layers = nn.ModuleList([
@@ -162,13 +179,13 @@ class RoutingCritic(nn.Module):
         )
 
         # Readout input size depends on whether shared encoders are used
-        # Base: graph_embed (hidden_dim) + unrouted_embed (hidden_dim) = hidden_dim * 2
-        readout_input_dim = hidden_dim * 2
+        # Base: graph_embed (hidden_dim) + unrouted_embed (hidden_dim) + time_embed (hidden_dim) = hidden_dim * 3
+        readout_input_dim = hidden_dim * 3  # Added time embedding
         if self.use_shared_congestion:
             readout_input_dim += hidden_dim  # congestion embedding
         if self.use_shared_net_encoder:
             readout_input_dim += hidden_dim  # net embedding
-        
+
         # Readout: graph embedding → value
         self.readout = nn.Sequential(
             nn.Linear(readout_input_dim, hidden_dim),
@@ -183,6 +200,7 @@ class RoutingCritic(nn.Module):
     def forward(
         self,
         graph: RoutingGraph,
+        timestep: Optional[torch.Tensor] = None,
         net_features: Optional[torch.Tensor] = None,
         net_positions: Optional[torch.Tensor] = None,
         congestion_map: Optional[torch.Tensor] = None
@@ -191,6 +209,10 @@ class RoutingCritic(nn.Module):
 
         Args:
             graph: RoutingGraph with partial routing state
+            timestep: Optional diffusion timestep tensor [B] or [1]. Critical for
+                proper evaluation - at high t (e.g., 900), noisy states are expected
+                and should not be penalized. At low t (e.g., 100), states should
+                be nearly converged. If not provided, defaults to t=0 (terminal).
             net_features: Optional net features [num_nets, net_feat_dim] for shared encoder
             net_positions: Optional net positions [num_nets, 4] for shared encoder
             congestion_map: Optional congestion map [H, W] for shared encoder
@@ -220,15 +242,30 @@ class RoutingCritic(nn.Module):
         unrouted_frac = graph.unrouted_mask.float().mean().unsqueeze(0).unsqueeze(0)
         unrouted_embed = self.unrouted_encoder(unrouted_frac)
 
+        # Compute time embedding
+        # Default to t=0 (terminal state) if not provided for backward compatibility
+        if timestep is None:
+            timestep = torch.zeros(graph_embed.size(0), device=graph_embed.device)
+        elif timestep.dim() == 0:
+            timestep = timestep.unsqueeze(0)
+
+        # Normalize timestep to [0, 1] and compute embedding
+        t_normalized = timestep.float().view(-1, 1) / self.num_timesteps
+        t_embed = self.time_embed(t_normalized)
+
+        # Expand time embedding to match batch size if needed
+        if t_embed.size(0) == 1 and graph_embed.size(0) > 1:
+            t_embed = t_embed.expand(graph_embed.size(0), -1)
+
         # Use shared encoders if available
         shared_embeds = []
-        
+
         if self.use_shared_congestion and congestion_map is not None:
             # Get global congestion embedding from shared encoder
             batch_size = graph_embed.size(0)
             congestion_embed = self.shared_congestion_encoder(congestion_map, batch_size=batch_size)
             shared_embeds.append(congestion_embed)
-        
+
         if self.use_shared_net_encoder and net_features is not None and net_positions is not None:
             # Get net-level embeddings and aggregate
             net_embeds = self.shared_net_encoder(net_features, net_positions)
@@ -241,8 +278,8 @@ class RoutingCritic(nn.Module):
                 net_embed = net_embeds.mean(dim=1)
             shared_embeds.append(net_embed)
 
-        # Combine embeddings
-        all_embeds = [graph_embed, unrouted_embed] + shared_embeds
+        # Combine embeddings (now includes time embedding)
+        all_embeds = [graph_embed, unrouted_embed, t_embed] + shared_embeds
         combined = torch.cat(all_embeds, dim=-1)
 
         return self.readout(combined).squeeze(-1)
@@ -251,6 +288,7 @@ class RoutingCritic(nn.Module):
         self,
         graph: RoutingGraph,
         threshold: float = 0.5,
+        timestep: Optional[torch.Tensor] = None,
         net_features: Optional[torch.Tensor] = None,
         net_positions: Optional[torch.Tensor] = None,
         congestion_map: Optional[torch.Tensor] = None
@@ -260,6 +298,7 @@ class RoutingCritic(nn.Module):
         Args:
             graph: Routing state
             threshold: Pruning threshold
+            timestep: Optional diffusion timestep for time-aware evaluation
             net_features: Optional net features for shared encoder
             net_positions: Optional net positions for shared encoder
             congestion_map: Optional congestion map for shared encoder
@@ -267,7 +306,7 @@ class RoutingCritic(nn.Module):
         Returns:
             (score, should_prune)
         """
-        score = self.forward(graph, net_features, net_positions, congestion_map)
+        score = self.forward(graph, timestep, net_features, net_positions, congestion_map)
         should_prune = score.item() < threshold
         return score, should_prune
 
